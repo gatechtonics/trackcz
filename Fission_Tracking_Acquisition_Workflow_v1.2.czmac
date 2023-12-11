@@ -1,0 +1,2604 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Script>
+  <Context>Zen26</Context>
+  <Version>1.0</Version>
+  <Language>Python</Language>
+  <Text>############################################
+############# Fission Tracking #############
+############ Image Acquisitions ############
+############### FINAL FLOW #################
+############################################
+class PrepareAcquisition:
+    """PrepareAcquisition class is used to gather data from the customer for the upcoming acquisition.
+
+    Methods:
+        get_current_stageXY()
+        calculate(self, interest, known_coordinates)
+        get_tile_image_coordinates(self, type)
+        get_center_coordinates(self, image)
+        acquire_tile_image(self, exp, dict_coordinates)
+        ask_about_tile_quality(self, mount_img_name, mica_img_name)
+        tile_image_acquisition_steps(self, mode)
+        previous_experiment_index(self, exp_type_list, exp_name)
+        verified_short_files(self, file_list, validation_key)
+        show_experiment_window(self, extern_detect, experiments_dict)
+        delete_folder_content()
+        read_from_registry(self, key)
+        mount_list()
+        make_output_directory(self, parent_dir, child_dir)
+        show_input_window()
+    """
+
+    def get_current_stageXY(self):
+        """This method returns the current position of the stage."""
+
+        coordinates = {}
+        coordinates["x"] = Zen.Devices.Stage.ActualPositionX
+        coordinates["y"] = Zen.Devices.Stage.ActualPositionY
+        return coordinates
+
+    def calculate(self, interest, known_coordinates):
+        """This method, in function of interest, calculates the tile image coordinates.
+
+        Input Arguments:
+        interest must be string
+        known_coordinates must be dictionary
+        Returns: The interest coordinates in a dictionary.
+        """
+
+        coordinates = {}
+        if interest == "upper_right_corner":
+            coordinates["x"] = known_coordinates["lower_right_corner"]["x"]
+            coordinates["y"] = known_coordinates["upper_left_corner"]["y"]
+            return coordinates
+        elif interest == "lower_left_corner":
+            coordinates["x"] = known_coordinates["upper_left_corner"]["x"]
+            coordinates["y"] = known_coordinates["lower_right_corner"]["y"]
+            return coordinates
+        elif interest == "height":
+            height = abs(known_coordinates["upper_right_corner"]["y"] - known_coordinates["lower_right_corner"]["y"])
+            return height
+        elif interest == "width":
+            width = abs(known_coordinates["upper_right_corner"]["x"] - known_coordinates["upper_left_corner"]["x"])
+            return width
+
+    def get_tile_image_coordinates(self, type):
+        """This method allows the customer to select the upper left and the lower right corners of mount/mica.
+
+        Input Arguments: type must be string
+        Returns: all the calculated and acquired data for the type(mica/mount) in a dictionary.
+        """
+        import time
+
+        dict = {}
+        start_arrow = "🢄"
+        end_arrow = "🢆"
+        dict["type"] = type
+        if type == "mica":
+            start_arrow = "🡽"
+        upper_left_mssg = type.upper() + " OVERVIEW IMAGE* : " + '\n' + "Please go to upper left corner " + start_arrow
+        lower_rigth_mssg = type.upper() + " OVERVIEW IMAGE* : " + '\n' + "Please go to lower right corner" + end_arrow + ". " + '\n' + " The current Z value will be considered for the tile image, so make sure you are focused well. "
+        try:
+            Zen.Application.Pause(upper_left_mssg)
+            time.sleep(0.01)
+        except SystemExit:
+            warning = ZenWindow()
+            warning.Initialize('WARNING')
+            warning.AddLabel(
+                'Are you sure you want to exit? Press CANCEL\nif you want to continue or OK\nto exit the flow.')
+            result_warning = warning.Show()
+            if not result_warning.HasCanceled:
+                raise SystemExit
+
+        dict["upper_left_corner"] = self.get_current_stageXY()
+        time.sleep(1)
+        try:
+            Zen.Application.Pause(lower_rigth_mssg)
+            time.sleep(0.01)
+        except SystemExit:
+            warning = ZenWindow()
+            warning.Initialize('WARNING')
+            warning.AddLabel(
+                'Are you sure you want to exit? Press CANCEL\nif you want to continue or OK\nto exit the flow.')
+            result_warning = warning.Show()
+            if not result_warning.HasCanceled:
+                raise SystemExit
+
+        dict["lower_right_corner"] = self.get_current_stageXY()
+        time.sleep(1)
+        dict["upper_right_corner"] = self.calculate("upper_right_corner", dict)
+        dict["lower_left_corner"] = self.calculate("lower_left_corner", dict)
+        dict["center"] = {"x": (dict["upper_left_corner"]["x"] + dict["lower_right_corner"]["x"]) / 2,
+                          "y": (dict["upper_left_corner"]["y"] + dict["lower_right_corner"]["y"]) / 2}
+        dict["height"] = self.calculate("height", dict)
+        dict["width"] = self.calculate("width", dict)
+        dict["live_Zposition"] = Zen.Devices.Focus.ActualPosition
+        return dict
+
+    def get_center_coordinates(self, image):
+        """This method calculates the center coordinates of the tile images.
+
+        Input Arguments: image must be a ZenImage object
+        Returns: center x, center y, scaling x &amp; scaling y of the image as a dictionary.
+        """
+
+        image_metadata = {}
+        image_metadata["x"] = float(image.Metadata.Width) / 2
+        image_metadata["y"] = float(image.Metadata.Height) / 2
+        image_metadata["scaling_x"] = float(image.Scaling.X)
+        image_metadata["scaling_y"] = float(image.Scaling.Y)
+        return image_metadata
+
+    def acquire_tile_image(self, exp, dict_coordinates):
+        """This method, with the data gathered in previous steps, sets up the experiment for the tile imaging.
+
+        Input Arguments:
+        exp must be string
+        dict_coordinates must be dictionary
+        """
+
+        global acquisition_informations
+        global blockindex
+
+        exp.ClearTileRegionsAndPositions(blockindex)
+        exp.AddRectangleTileRegion(blockindex, dict_coordinates["center"]["x"], dict_coordinates["center"]["y"],
+                                   dict_coordinates["width"], dict_coordinates["height"],
+                                   int(dict_coordinates["live_Zposition"]))
+        tile_image = Zen.Acquisition.Execute(exp)
+        tile_image_name = dict_coordinates["type"] + "_tile_image"
+        tile_image_location = acquisition_informations["output_path"] + "\\" + tile_image_name + ".czi"
+        Zen.Application.Save(tile_image, tile_image_location, False)
+        acquisition_informations[dict_coordinates["type"] + "_tile_image_center"] = self.get_center_coordinates(
+            tile_image)
+        acquisition_informations[dict_coordinates["type"] + "_tile_image_name"] = tile_image_name
+        acquisition_informations[dict_coordinates["type"] + "_tile_image"] = tile_image_location
+
+    def ask_about_tile_quality(self, mount_img_name, mica_img_name):
+        """This method ask the user about the tile image quality by a pop-up window.
+
+        Input Arguments:
+        mount_img_name must be string
+        mica_img_name must be string
+        """
+
+        mount_img = Zen.Application.Documents.GetByName(mount_img_name)
+        if mica_img_name != None:
+            mica_img = Zen.Application.Documents.GetByName(mica_img_name)
+            option_list = ["Yes", "Redo: Both", "Redo: Mount", "Redo: Mica"]
+        else:
+            option_list = ["Yes", "Redo"]
+        application_window = ZenWindow()
+        application_window.Initialize("Rating")
+        if mica_img_name != None:
+            application_window.AddImage2dView(mount_img, False, '0', '0')
+            application_window.AddImage2dView(mica_img, False, '0', '1')
+            application_window.AddLabel('Are the tile images correctly taken?', '1', '2')
+        else:
+            application_window.AddImage2dView(mount_img, False)
+            application_window.AddLabel('Is this mount tile image corectly taken?')
+        application_window.AddDropDown('answer', 'Select an option: ', option_list, 0, '2', '2')
+        application_UI = application_window.Show()
+        if application_UI.HasCanceled:
+            message = 'Fission Tracking Tile Image Acquisition was canceled by user.'
+            Zen.Windows.Show(message)
+            raise SystemExit
+        answer = str(application_UI.GetValue('answer'))
+
+        if mica_img_name != None:
+            if answer == "Yes":
+                Calibration().start_calibration()
+            elif answer == "Redo: Both":
+                Zen.Application.Documents.RemoveAll(False)
+                self.tile_image_acquisition_steps(answer.split(":")[-1][1:])
+            elif answer == "Redo: Mount":
+                Zen.Application.Documents.Remove(mount_img, False)
+                self.tile_image_acquisition_steps(answer.split(":")[-1][1:])
+            elif answer == "Redo: Mica":
+                Zen.Application.Documents.Remove(mica_img, False)
+                self.tile_image_acquisition_steps(answer.split(":")[-1][1:])
+        else:
+            if answer == "Yes":
+                AcquisitionSuit().grain_management(None)
+            elif answer == "Redo":
+                Zen.Application.Documents.Remove(mount_img, False)
+                self.tile_image_acquisition_steps("Both")
+
+    def tile_image_acquisition_steps(self, mode):
+        """This method organize the steps for a successful tile image acquisition.
+
+        Input Arguments: mode must be string
+        """
+
+        import time
+        global acquisition_informations
+
+        dict = {}
+        if mode == "Both":
+            if "coordinate" in acquisition_informations.keys() and acquisition_informations["coordinates"] != []:
+                Zen.Devices.Stage.MoveTo(float(dict["mount"]["upper_right_corner"]["x"]),
+                                         float(dict["mount"]["upper_right_corner"]["y"]))
+                time.sleep(1)
+            acquisition_informations["coordinates"] = []
+            experiment = Zen.Acquisition.Experiments.GetByFileName(
+                acquisition_informations["experiments"]["mount_overview"])
+            experiment.SetActive()
+            Zen.Acquisition.StartLive(experiment)
+            dict["mount"] = self.get_tile_image_coordinates("mount")
+            acquisition_informations["coordinates"].append(dict["mount"])
+            Zen.Devices.Stage.MoveTo(float(dict["mount"]["upper_right_corner"]["x"]),
+                                     float(dict["mount"]["upper_right_corner"]["y"]))
+            if (acquisition_informations["external_detector"]):
+                dict["mica"] = self.get_tile_image_coordinates("mica")
+                acquisition_informations["coordinates"].append(dict["mica"])
+            Zen.Acquisition.StopLive(experiment)
+            if acquisition_informations["external_detector"]:
+                for coordinates in acquisition_informations["coordinates"]:
+                    self.acquire_tile_image(experiment, coordinates)
+                self.ask_about_tile_quality(acquisition_informations["mount_tile_image_name"],
+                                            acquisition_informations["mica_tile_image_name"])
+            else:
+                self.acquire_tile_image(experiment, acquisition_informations["coordinates"][0])
+                self.ask_about_tile_quality(acquisition_informations["mount_tile_image_name"], None)
+        elif mode == "Mount":
+            Zen.Devices.Stage.MoveTo(float(acquisition_informations["coordinates"][0]["upper_right_corner"]["x"]),
+                                     float(acquisition_informations["coordinates"][0]["upper_right_corner"]["y"]))
+            time.sleep(1)
+            acquisition_informations["coordinates"].pop(0)
+            experiment = Zen.Acquisition.Experiments.GetByFileName(
+                acquisition_informations["experiments"]["mount_overview"])
+            experiment.SetActive()
+            Zen.Acquisition.StartLive(experiment)
+            dict["mount"] = self.get_tile_image_coordinates("mount")
+            acquisition_informations["coordinates"].insert(0, dict["mount"])
+            Zen.Acquisition.StopLive(experiment)
+            for coordinates in acquisition_informations["coordinates"]:
+                if acquisition_informations["coordinates"].index(coordinates) == 0:
+                    self.acquire_tile_image(experiment, coordinates)
+                else:
+                    continue
+            self.ask_about_tile_quality(acquisition_informations["mount_tile_image_name"],
+                                        acquisition_informations["mica_tile_image_name"])
+        elif mode == "Mica":
+            Zen.Devices.Stage.MoveTo(float(acquisition_informations["coordinates"][0]["upper_right_corner"]["x"]),
+                                     float(acquisition_informations["coordinates"][0]["upper_right_corner"]["y"]))
+            time.sleep(1)
+            acquisition_informations["coordinates"].pop(1)
+            experiment = Zen.Acquisition.Experiments.GetByFileName(
+                acquisition_informations["experiments"]["mount_overview"])
+            experiment.SetActive()
+            Zen.Acquisition.StartLive(experiment)
+            dict["mica"] = self.get_tile_image_coordinates("mica")
+            acquisition_informations["coordinates"].insert(1, dict["mica"])
+            Zen.Acquisition.StopLive(experiment)
+            for coordinates in acquisition_informations["coordinates"]:
+                if acquisition_informations["coordinates"].index(coordinates) == 1:
+                    self.acquire_tile_image(experiment, coordinates)
+                else:
+                    continue
+            self.ask_about_tile_quality(acquisition_informations["mount_tile_image_name"],
+                                        acquisition_informations["mica_tile_image_name"])
+
+    def previous_experiment_index(self, exp_type_list, exp_name):
+        """This method reads out the previous experiments for the current MountID and calculates their indexes from the drop-down menu.
+
+        Input Arguments:
+        exp_type_list must be list
+        exp_name must be string
+        Returns: exp_name's index from the parameter list as an integer.
+        """
+
+        previous_experiment_index = exp_type_list.index(exp_name)
+        return previous_experiment_index
+
+    def verified_short_files(self, file_list, validation_key):
+        """This method validates the experiment names by the Prefix they have: [OV, TL, RL].
+
+        Input Arguments:
+        file_list must be list
+        validation_key must be string
+        Returns: the valid list of the accepted elements from the original one.
+        """
+
+        from System.IO import File, Directory, Path
+
+        files_short = []
+        for short in file_list:
+            if validation_key in short:
+                files_short.append(Path.GetFileName(short))
+        return files_short
+
+    def show_experiment_window(self, extern_detect, experiments_dict):
+        """This method shows the customer a pop-up window with the experiments grouped from the validation.
+
+        Input Arguments:
+        extern_detect must be boolean
+        experiments_dict must be dictionary
+        Returns: a dictionary with the experiments the customer has selected.
+        """
+
+        from System.IO import File, Directory, Path
+
+        experiments = {}
+        doc_folder = Zen.Application.Environment.GetFolderPath(ZenSpecialFolder.UserDocuments)
+        expfiles = Directory.GetFiles(Path.Combine(doc_folder, 'Experiment Setups'), '*.czexp')
+        expfiles_overview = self.verified_short_files(expfiles, "OV")
+        expfiles_reflected = self.verified_short_files(expfiles, "RL")
+        expfiles_transmissive = self.verified_short_files(expfiles, "TL")
+        application_window = ZenWindow()
+        application_window.Initialize("FISSION TRACKING EXPERIMENT SETUP")
+
+        if experiments_dict == None:
+            if extern_detect:
+                application_window.AddLabel('EXPERIMENTS FOR MOUNT')
+                application_window.AddDropDown('mount_overview', 'Select Overview Experiment:                  ',
+                                               expfiles_overview, 0)
+                application_window.AddDropDown('mount_reflective', 'Select Reflective Light Experiment: ',
+                                               expfiles_reflected, 0)
+                application_window.AddDropDown('mount_transmissive', 'Select Transmissive Light Experiment: ',
+                                               expfiles_transmissive, 0)
+                application_window.AddLabel('\n')
+                application_window.AddLabel('EXPERIMENTS FOR MICA')
+                application_window.AddDropDown('mica_overview', 'Select Overview Experiment:                  ',
+                                               expfiles_overview, 0)
+                application_window.AddDropDown('mica_reflective', 'Select Reflective Light Experiment: ',
+                                               expfiles_reflected, 0)
+                application_window.AddDropDown('mica_transmissive', 'Select Transmissive Light Experiment: ',
+                                               expfiles_transmissive, 0)
+                application_UI = application_window.Show()
+                if application_UI.HasCanceled:
+                    message = 'Fission Tracking Experiment Selection was canceled by user.'
+                    Zen.Windows.Show(message)
+                    raise SystemExit
+                experiments["mount_overview"] = str(application_UI.GetValue('mount_overview'))
+                experiments["mount_reflective"] = str(application_UI.GetValue('mount_reflective'))
+                experiments["mount_transmissive"] = str(application_UI.GetValue('mount_transmissive'))
+                experiments["mica_overview"] = str(application_UI.GetValue('mica_overview'))
+                experiments["mica_reflective"] = str(application_UI.GetValue('mica_reflective'))
+                experiments["mica_transmissive"] = str(application_UI.GetValue('mica_transmissive'))
+            else:
+                application_window.AddLabel('EXPERIMENTS FOR MOUNT')
+                application_window.AddDropDown('mount_overview', 'Select Overview Experiment:                  ',
+                                               expfiles_overview, 0)
+                application_window.AddDropDown('mount_reflective', 'Select Reflective Light Experiment: ',
+                                               expfiles_reflected, 0)
+                application_window.AddDropDown('mount_transmissive', 'Select Transmissive Light Experiment: ',
+                                               expfiles_transmissive, 0)
+                application_window.AddLabel('\n')
+                application_UI = application_window.Show()
+                if application_UI.HasCanceled:
+                    message = 'Fission Tracking Experiment Selection was canceled by user.'
+                    Zen.Windows.Show(message)
+                    raise SystemExit
+                experiments["mount_overview"] = str(application_UI.GetValue('mount_overview'))
+                experiments["mount_reflective"] = str(application_UI.GetValue('mount_reflective'))
+                experiments["mount_transmissive"] = str(application_UI.GetValue('mount_transmissive'))
+        else:
+            if extern_detect:
+                application_window.AddLabel('EXPERIMENTS FOR MOUNT')
+                application_window.AddDropDown('mount_overview', 'Select Overview Experiment:                  ',
+                                               expfiles_overview, self.previous_experiment_index(expfiles_overview,
+                                                                                                 experiments_dict[
+                                                                                                     "mount_overview"]))
+                application_window.AddDropDown('mount_reflective', 'Select Reflective Light Experiment: ',
+                                               expfiles_reflected, self.previous_experiment_index(expfiles_reflected,
+                                                                                                  experiments_dict[
+                                                                                                      "mount_reflective"]))
+                application_window.AddDropDown('mount_transmissive', 'Select Transmissive Light Experiment: ',
+                                               expfiles_transmissive,
+                                               self.previous_experiment_index(expfiles_transmissive,
+                                                                              experiments_dict["mount_transmissive"]))
+                application_window.AddLabel('\n')
+                application_window.AddLabel('EXPERIMENTS FOR MICA')
+                application_window.AddDropDown('mica_overview', 'Select Overview Experiment:                  ',
+                                               expfiles_overview, self.previous_experiment_index(expfiles_overview,
+                                                                                                 experiments_dict[
+                                                                                                     "mica_overview"]))
+                application_window.AddDropDown('mica_reflective', 'Select Reflective Light Experiment: ',
+                                               expfiles_reflected, self.previous_experiment_index(expfiles_reflected,
+                                                                                                  experiments_dict[
+                                                                                                      "mica_reflective"]))
+                application_window.AddDropDown('mica_transmissive', 'Select Transmissive Light Experiment:',
+                                               expfiles_transmissive,
+                                               self.previous_experiment_index(expfiles_transmissive,
+                                                                              experiments_dict["mica_transmissive"]))
+                application_UI = application_window.Show()
+                if application_UI.HasCanceled:
+                    message = 'Fission Tracking Experiment Selection was canceled by user.'
+                    Zen.Windows.Show(message)
+                    raise SystemExit
+                experiments["mount_overview"] = str(application_UI.GetValue('mount_overview'))
+                experiments["mount_reflective"] = str(application_UI.GetValue('mount_reflective'))
+                experiments["mount_transmissive"] = str(application_UI.GetValue('mount_transmissive'))
+                experiments["mica_overview"] = str(application_UI.GetValue('mica_overview'))
+                experiments["mica_reflective"] = str(application_UI.GetValue('mica_reflective'))
+                experiments["mica_transmissive"] = str(application_UI.GetValue('mica_transmissive'))
+            else:
+                application_window.AddLabel('EXPERIMENTS FOR MOUNT')
+                application_window.AddDropDown('mount_overview', 'Select Overview Experiment:                  ',
+                                               expfiles_overview, self.previous_experiment_index(expfiles_overview,
+                                                                                                 experiments_dict[
+                                                                                                     "mount_overview"]))
+                application_window.AddDropDown('mount_reflective', 'Select Reflective Light Experiment: ',
+                                               expfiles_reflected, self.previous_experiment_index(expfiles_reflected,
+                                                                                                  experiments_dict[
+                                                                                                      "mount_reflective"]))
+                application_window.AddDropDown('mount_transmissive', 'Select Transmissive Light Experiment: ',
+                                               expfiles_transmissive,
+                                               self.previous_experiment_index(expfiles_transmissive,
+                                                                              experiments_dict["mount_transmissive"]))
+                application_window.AddLabel('')
+                application_UI = application_window.Show()
+                if application_UI.HasCanceled:
+                    message = 'Fission Tracking Experiment Selection was canceled by user.'
+                    Zen.Windows.Show(message)
+                    raise SystemExit
+                experiments["mount_overview"] = str(application_UI.GetValue('mount_overview'))
+                experiments["mount_reflective"] = str(application_UI.GetValue('mount_reflective'))
+                experiments["mount_transmissive"] = str(application_UI.GetValue('mount_transmissive'))
+        return experiments
+
+    def delete_folder_content(self):
+        """This method empties the content from folder."""
+
+        global acquisition_informations
+        import os
+        import shutil
+
+        root_path = acquisition_informations["output_path"]
+        for root, dirs, files in os.walk(root_path):
+            for f in files:
+                os.unlink(os.path.join(root, f))
+            for d in dirs:
+                shutil.rmtree(os.path.join(root, d))
+
+    def read_from_registry(self, key):
+        """This method reads from the registry.
+
+        Input Arguments: key must be string
+        Returns: the json from the parameter key.
+        """
+
+        from Microsoft.Win32 import Registry
+
+        info = {}
+        defaultValue = ""
+        fission_tracking_registry_path = "HKEY_CURRENT_USER\SOFTWARE\Carl Zeiss\Fission Tracking"
+        info = Registry.GetValue(fission_tracking_registry_path, key, defaultValue)
+        return info
+
+    def mount_list(self):
+        """This method returns all the previously acquired and saved Mound IDs."""
+
+        import _winreg
+
+        mount_list = []
+        key = _winreg.OpenKey(_winreg.HKEY_CURRENT_USER, r'SOFTWARE\Carl Zeiss\Fission Tracking', 0, _winreg.KEY_READ)
+        for i in xrange(0, _winreg.QueryInfoKey(key)[1]):
+            usefule_information = _winreg.EnumValue(key, i)
+            mount_list.append(usefule_information[0])
+        return mount_list
+
+    def make_output_directory(self, parent_dir, child_dir):
+        """This method creates the output directory, if it already exists it will show a warning message.
+
+        Input Arguments:
+        parent_dir must be string
+        child_dir must be string
+        """
+
+        import os
+
+        path = os.path.join(parent_dir, child_dir)
+        if not os.path.exists(path):
+            os.mkdir(path)
+            return path
+        else:
+            Zen.Windows.Show("Directory already exists!")
+            self.show_input_window()
+
+    def show_input_window(self):
+        """This method initializes the application and shows the first window."""
+
+        import ast
+        global acquisition_informations
+
+        already_done_mountID = self.mount_list()
+        extrnl_dtct = False
+
+        application_window = ZenWindow()
+        application_window.Initialize("FISSION TRACKING ACQUISITION")
+        application_window.AddLabel('NEW MOUNT')
+        application_window.AddTextBox('mount_id', "New Mount ID: ", "")
+        application_window.AddCheckbox('external_detector', "External detector: ", True)
+        application_window.AddFolderBrowser('output_folder', 'Select the output location: ', '')
+        application_window.AddLabel('\n')
+        if already_done_mountID != []:
+            application_window.AddLabel('LOAD MOUNT')
+            application_window.AddDropDown('load_mount_id', "Load Mount ID: ", already_done_mountID, 0)
+            application_window.AddCheckbox('redo', "Redo everything:          ", False)
+
+        application_UI = application_window.Show()
+
+        if application_UI.HasCanceled:
+            message = 'Fission Tracking Acquisition was canceled by user.'
+            Zen.Windows.Show(message)
+            raise SystemExit
+
+        if application_UI.GetValue('mount_id') == "":
+            if application_UI.GetValue('redo'):
+                acquisition_informations = ast.literal_eval(
+                    self.read_from_registry(application_UI.GetValue('load_mount_id')))
+                acquisition_informations["grains_acquired"] = []
+                self.delete_folder_content()
+                if acquisition_informations["external_detector"]:
+                    extrnl_dtct = True
+                    acquisition_informations["experiments"] = self.show_experiment_window(extrnl_dtct,
+                                                                                          acquisition_informations[
+                                                                                              "experiments"])
+                else:
+                    acquisition_informations["experiments"] = self.show_experiment_window(extrnl_dtct,
+                                                                                          acquisition_informations[
+                                                                                              "experiments"])
+                self.tile_image_acquisition_steps("Both")
+            else:
+                acquisition_informations = ast.literal_eval(
+                    self.read_from_registry(application_UI.GetValue('load_mount_id')))
+                AcquisitionSuit().grain_management("Open")
+        else:
+            acquisition_informations["mount_id"] = str(application_UI.GetValue('mount_id'))
+            acquisition_informations["external_detector"] = application_UI.GetValue('external_detector')
+            acquisition_informations["output_path"] = self.make_output_directory(
+                application_UI.GetValue('output_folder'), acquisition_informations["mount_id"])
+
+            if acquisition_informations["external_detector"]:
+                extrnl_dtct = True
+                acquisition_informations["experiments"] = self.show_experiment_window(extrnl_dtct, None)
+            else:
+                acquisition_informations["experiments"] = self.show_experiment_window(extrnl_dtct, None)
+            self.tile_image_acquisition_steps("Both")
+
+
+class CziXmlParser:
+    """CziXmlParser class is used to parse metadata as necessary, ex: images, experiments.
+
+    Methods:
+        get_pinpoints_location(self, string)
+        read_metadata(self, lines, string)
+        read_object_from_czi(self, purpose, image_path)
+        set_zstack_experiment(self, experiment_name, z0, z1)
+    """
+
+    def get_pinpoints_location(self, string):
+        """This method collects the position of circles from the image at coarse calibration.
+
+        Input Arguments: string must be string
+        Returns: center x, center y of the circle as dictionary.
+        """
+
+        import xml.etree.ElementTree as ET
+
+        coordinates_dict = []
+        root = ET.fromstring(string)
+        circles = root.findall("Metadata/Layers/Layer/Elements/Circle[@Id]/Geometry")
+        for circle in circles:
+            dict = {}
+            dict["x"] = float(circle.find("./CenterX").text)
+            dict["y"] = float(circle.find("./CenterY").text)
+            coordinates_dict.append(dict)
+        return coordinates_dict
+
+    def read_metadata(self, lines, string):
+        """This method stores the read metadata as a string.
+
+        Input Arguments:
+        lines must be string
+        string must be string
+        Returns: the metadata from the parse as string.
+        """
+
+        write = 0
+        for i in lines:
+            try:
+                if '&lt;Metadata&gt;' in i:
+                    write += 1
+                elif '&lt;/Metadata&gt;' in i:
+                    if write == 1:
+                        string += i
+                    write -= 1
+                if write &gt; 0:
+                    string += i
+            except:
+                pass
+        return string
+
+    def read_object_from_czi(self, purpose, image_path):
+        """This method seeks out the byte where the useful information is located then it parses the image metadata.
+
+        Input Arguments:
+        purpose must be string
+        image_path must be string
+        Returns: data of interest as dictionary.
+        """
+
+        from xml.etree.ElementTree import fromstring, ElementTree
+        import os
+
+        result_string = "&lt;Root&gt;"
+        xml_path = image_path
+        with open(xml_path, 'rb') as file:
+            file.seek(-1024 * 1024 * 1, os.SEEK_END)
+            lines = file.readlines()
+            result_string = self.read_metadata(lines, result_string)
+            result_string += "&lt;/Root&gt;"
+        file.close()
+        if purpose == "coarse_calibration":
+            coordinates = self.get_pinpoints_location(result_string)
+            return coordinates
+
+    def set_zstack_experiment(self, experiment_name, z0, z1):
+        """This method parses the experiment xml and changes the z0, z1 range for the z-stack acquisition.
+
+        Input Arguments:
+        experiment_name must be string
+        z0 must be float
+        z1 must be float
+        Returns: a cloned ZenExperiment object with the changes.
+        """
+
+        from xml.etree.ElementTree import fromstring, ElementTree
+        import xml.etree.ElementTree as ET
+
+        xml_root = ET.parse(experiment_name.FileName)
+        new_file_path = experiment_name.FileName[:-len(experiment_name.FileName.split('\\')[-1])] + \
+                        experiment_name.FileName.split('\\')[-1][:-6] + "_zstack.czexp"
+
+        first_pozition = z0 / 1000000
+        last_pozition = z1 / 1000000
+
+        first = xml_root.find("ExperimentBlocks/AcquisitionBlock/SubDimensionSetups/ZStackSetup/First/Distance/Value")
+        last = xml_root.find("ExperimentBlocks/AcquisitionBlock/SubDimensionSetups/ZStackSetup/Last/Distance/Value")
+        first.text = str(first_pozition)
+        last.text = str(last_pozition)
+        with open(new_file_path, 'wb') as f:
+            xml_root.write(f)
+        new_exp = new_file_path.split("\\")[-1]
+        current_experiment = Zen.Acquisition.Experiments.GetByName(new_exp)
+        current_experiment.SetActive()
+        return current_experiment
+
+
+class CalibrationCalculus:
+    """CalibrationCalculus class is used for NumpyDotNet implementations in OAD.
+
+    Methods:
+        rotation_matrix_calc_two_solutions(self, Delta_t, Delta_r)
+        main_rotation_matrix(self, Axis, Theta)
+        rotation_matrix_calc(self, Delta_t_1, Delta_r_1, Delta_t_2, Delta_r_2)
+        calculate_coarse_matrix(self, point_2, point_1, point_3, point_2_mica, point_1_mica, point_3_mica)
+        Vector_Norm(self, Vec)
+        Normalize_Vec(self, Vec)
+        RotationMatrix3D_Calc(self, Delta_t_1, Delta_r_1, Delta_t_2, Delta_r_2)
+        calculate_fine_matrix(self, point_1, point_2, point_3, point_1_mica, point_2_mica, point_3_mica)
+        multiply_coarse_matrix(self, pinpoints_list, coarse_matrix, point_grain_x, point_grain_y)
+        multiply_fine_matrix(self, fine_points_list, fine_matrix, point_grain_x, point_grain_y, point_grain_z)
+        transposeMatrix(self, m)
+        getMatrixMinor(self, m, i, j)
+        getMatrixDeterminant(self, m)
+        getMatrixInverse(self, m)
+        start2D(self, pinpoints_list)
+        start3D(self, fine_list)
+    """
+
+    def rotation_matrix_calc_two_solutions(self, Delta_t, Delta_r):
+        """This method computes the initial rotation matrix with two solutions for the coarse calibration.
+
+        Input Arguments:
+        Delta_t must be list
+        Delta_r must be list
+        Returns: two rotation angles Theta_Flip_1, Theta_Flip_2 as integer.
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+
+        DeltaX_t = Delta_t[0]
+        DeltaY_t = Delta_t[1]
+
+        DeltaX_r = Delta_r[0]
+        DeltaY_r = Delta_r[1]
+
+        # Calculating the length of dispalcement vectors
+        rho_t = math.sqrt(DeltaX_t ** 2 + DeltaY_t ** 2)  # Length of theoritical displacement vector
+        rho_r = math.sqrt(DeltaX_r ** 2 + DeltaY_r ** 2)  # Length of real displacement vector
+        # Calculating the Phi angle
+        Phi = math.atan2(DeltaY_r / rho_r, DeltaX_r / rho_r)  # Calculating the auxiliary angle: Phi
+        # Formula for calculating the theta from first equation of geometrical equations set  (without flip)
+        Theta_1 = Phi - math.atan2(DeltaY_t / rho_r, DeltaX_t / rho_r)
+        # Formula for calculating the theta from first equation of geometrical equations set (with flip)
+        Theta_2 = Phi + math.atan2(DeltaY_t / rho_r, DeltaX_t / rho_r)
+        if Theta_1 &lt; 0:
+            Theta_1 = Theta_1 + 2 * math.pi
+        if Theta_2 &lt; 0:
+            Theta_2 = Theta_2 + 2 * math.pi
+        # Converting the angles to degree
+        Theta_1_Deg = Theta_1 * 180 / math.pi
+        Theta_2_Deg = Theta_2 * 180 / math.pi
+        # Removing digits after third decimal number
+        Theta_Z = npdn.np.array([[round(Theta_1_Deg * 1000.0) / 1000.0],
+                                 [round(Theta_2_Deg * 1000.0) / 1000.0]])
+        Theta_Z[Theta_Z &lt; 0] += 360
+        RotAngle_Flip_0 = Theta_Z[0]
+        RotAngle_Flip_1 = Theta_Z[1]
+        return RotAngle_Flip_0, RotAngle_Flip_1
+
+    def main_rotation_matrix(self, Axis, Theta):
+        """This method optimizes the rotation matrix for coarse calibration.
+
+        Input Arguments:
+        Axis must be string
+        Theta must be array
+        Returns: the optimized version of the rotation matrix for coarse calibration as a NumpyDotNetArray
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+
+        RotM = npdn.np.eye(3)
+        if Axis == '1' or Axis == 'x' or Axis == 'X':
+            RotM = npdn.np.array([[1, 0, 0],
+                                  [0, +math.cos(Theta), +math.sin(Theta)],
+                                  [0, -math.sin(Theta), +math.cos(Theta)]])
+        elif Axis == '2' or Axis == 'y' or Axis == 'Y':
+            RotM = npdn.np.array([[+math.cos(Theta), 0, -math.sin(Theta)],
+                                  [0, 1, 0],
+                                  [+math.sin(Theta), 0, +math.cos(Theta)]])
+        elif Axis == '3' or Axis == 'z' or Axis == 'Z':
+            RotM = npdn.np.array([[+math.cos(list(Theta)[0]), +math.sin(list(Theta)[0]), 0],
+                                  [-math.sin(list(Theta)[0]), +math.cos(list(Theta)[0]), 0],
+                                  [0, 0, 1]])
+        return (RotM)
+
+    def rotation_matrix_calc(self, Delta_t_1, Delta_r_1, Delta_t_2, Delta_r_2):
+        """This method calculates the rotation matrix for the coarse calibration matrix.
+
+        Input Arguments:
+        Delta_t_1 must be list
+        Delta_r_1 must be list
+        Delta_t_2 must be list
+        Delta_r_2 must be list
+        Returns: rotation matrix for the coarse matrix as a NumpyDotNetArray.
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+
+        RotAngle_1_Flip_0, RotAngle_1_Flip_1 = self.rotation_matrix_calc_two_solutions(Delta_t_1, Delta_r_1)
+        RotAngle_2_Flip_0, RotAngle_2_Flip_1 = self.rotation_matrix_calc_two_solutions(Delta_t_2, Delta_r_2)
+
+        RM1_Flip_0 = self.main_rotation_matrix('Z', RotAngle_1_Flip_0 * math.pi / 180)
+        RM1_Flip_1 = npdn.np.dot(self.main_rotation_matrix('X', math.pi),
+                                 self.main_rotation_matrix('Z', RotAngle_1_Flip_1 * math.pi / 180))
+
+        RM1_Flip_0 = npdn.np.array([[RM1_Flip_0[0][0], RM1_Flip_0[0][1]], [RM1_Flip_0[1][0], RM1_Flip_0[1][1]]])
+        RM1_Flip_1 = npdn.np.array([[RM1_Flip_1[0][0], RM1_Flip_1[0][1]], [RM1_Flip_1[1][0], RM1_Flip_1[1][1]]])
+
+        Error_Flip_0 = npdn.np.dot(RM1_Flip_0, Delta_r_2) - Delta_t_2
+        Error_Flip_1 = npdn.np.dot(RM1_Flip_1, Delta_r_2) - Delta_t_2
+
+        ErrorNorm_2_Flip_0 = math.sqrt(Error_Flip_0[0] ** 2 + Error_Flip_0[1] ** 2) / math.sqrt(
+            Delta_t_2[0] ** 2 + Delta_t_2[1] ** 2)  # np.np.linalg.norm(Error_Flip_0) / np.np.linalg.norm(Delta_t_2)
+        ErrorNorm_2_Flip_1 = math.sqrt(Error_Flip_1[0] ** 2 + Error_Flip_1[1] ** 2) / math.sqrt(
+            Delta_t_2[0] ** 2 + Delta_t_2[1] ** 2)  # np.np.linalg.norm(Error_Flip_1) / np.np.linalg.norm(Delta_t_2)
+        Flip = 0
+        if ErrorNorm_2_Flip_1 &lt; ErrorNorm_2_Flip_0:
+            Flip = 1
+        if Flip == 0:
+            RotationAngle = npdn.np.mean(npdn.np.array([RotAngle_1_Flip_0, RotAngle_2_Flip_0]))
+            RotationAngle = npdn.np.array([RotationAngle.item()])
+            RotationMatrix = self.main_rotation_matrix('Z', RotationAngle * math.pi / 180)
+        elif Flip == 1:
+            RotationAngle = npdn.np.mean(npdn.np.array([RotAngle_1_Flip_1, RotAngle_2_Flip_1]))
+            RotationAngle = npdn.np.array([RotationAngle.item()])
+            RotationMatrix = npdn.np.dot(self.main_rotation_matrix('X', math.pi),
+                                         self.main_rotation_matrix('Z', RotationAngle * math.pi / 180))
+        RotationMatrix = npdn.np.array(
+            [[RotationMatrix[0][0], RotationMatrix[0][1]], [RotationMatrix[1][0], RotationMatrix[1][1]]])
+        return RotationAngle, Flip, RotationMatrix
+
+    def calculate_coarse_matrix(self, point_2, point_1, point_3, point_2_mica, point_1_mica, point_3_mica):
+        """This method additionally computes the coarse calibration matrix.
+
+        Input Arguments:
+        point_2 must be list
+        point_1 must be list
+        point_3 must be list
+        point_2_mica must be list
+        point_1_mica must be list
+        point_3_mica must be list
+        Returns: the coarse calibration matrix as NumpyDotNetArray.
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+
+        distance_p2_p1_y = abs(point_2[1] - point_1[1])
+        distance_p3_p1_y = abs(point_3[1] - point_1[1])
+        distance_p1_p2 = math.sqrt(((point_1[0] - point_2[0]) ** 2) + ((point_1[1] - point_2[1]) ** 2))
+        if distance_p2_p1_y &lt;= distance_p3_p1_y:
+            first_vector = npdn.np.array([distance_p1_p2, 0])
+        else:
+            first_vector = npdn.np.array([0, distance_p1_p2])
+        # Distance between p3 and p1p2 line
+        dif_points = point_2 - point_1
+        distance_p3_to_p1p2 = npdn.np.absolute(npdn.np.cross(point_2 - point_1, point_1 - point_3)) / math.sqrt(
+            dif_points[0] ** 2 + dif_points[1] ** 2)
+        # Distance from p1 to p3_prime where p3_prime is the cross between p1p2 and line from p3 on to it
+        distance_p3_p1 = math.sqrt(((point_1[0] - point_3[0]) ** 2) + ((point_1[1] - point_3[1]) ** 2))
+        distance_p1_p3_prime = math.sqrt(distance_p3_p1 ** 2 - distance_p3_to_p1p2.item() ** 2)
+        if distance_p2_p1_y &lt;= distance_p3_p1_y:
+            second_vector = npdn.np.array([distance_p1_p3_prime, distance_p3_to_p1p2.item()])
+        else:
+            second_vector = npdn.np.array([distance_p3_to_p1p2.item(), distance_p1_p3_prime])
+        third_vector_grain = point_2 - point_1
+        fourth_vector_grain = point_3 - point_1
+        third_vector_mica = point_2_mica - point_1_mica
+        fourth_vector_mica = point_3_mica - point_1_mica
+
+        rotation_angle_grain, flip_grain, rotation_matrix_grain = self.rotation_matrix_calc(first_vector,
+                                                                                            third_vector_grain,
+                                                                                            second_vector,
+                                                                                            fourth_vector_grain)
+
+        rotation_angle_mica, flip_mica, rotation_matrix_mica = self.rotation_matrix_calc(third_vector_mica,
+                                                                                         first_vector,
+                                                                                         fourth_vector_mica,
+                                                                                         second_vector)
+        coarse_matrix = npdn.np.matmul(rotation_matrix_mica, rotation_matrix_grain)
+        return coarse_matrix
+
+    def Vector_Norm(self, Vec):
+        """This method normalizes the input vector with different approach for better results.
+
+        Input Arguments:
+        Vec must be array
+        Returns: optimized version of the normalized vector as array.
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+
+        Dim = npdn.np.size(Vec)
+        NormSq2 = 0
+        for i in range(0, Dim):
+            NormSq2 = NormSq2 + (Vec[i]) ** 2
+
+        return math.sqrt(NormSq2)
+
+    def Normalize_Vec(self, Vec):
+        """This method normalizes the input vector for further computations.
+
+        Input Arguments: Vec must be array
+        Returns: the normalized vector as an array.
+        """
+
+        Vec_Norm = self.Vector_Norm(Vec)
+        return Vec / Vec_Norm
+
+    def RotationMatrix3D_Calc(self, Delta_t_1, Delta_r_1, Delta_t_2, Delta_r_2):
+        """This method calculates the rotation matrix for the fine calibration matrix.
+
+        Input Arguments:
+        Delta_t_1 must be list
+        Delta_r_1 must be list
+        Delta_t_2 must be list
+        Delta_r_2 must be list
+        Returns: rotation matrix for the fine matrix as a NumpyDotNetArray.
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+
+        Dim = npdn.np.size(Delta_t_1)
+        if Dim == 2:
+            Delta_t_1 = npdn.np.append(Delta_t_1, 0)
+            Delta_r_1 = npdn.np.append(Delta_r_1, 0)
+            Delta_t_2 = npdn.np.append(Delta_t_2, 0)
+            Delta_r_2 = npdn.np.append(Delta_r_2, 0)
+
+        Delta_t_1_N = self.Normalize_Vec(Delta_t_1)
+        Delta_r_1_N = self.Normalize_Vec(Delta_r_1)
+
+        Delta_t_2_N = self.Normalize_Vec(Delta_t_2)
+        Delta_r_2_N = self.Normalize_Vec(Delta_r_2)
+
+        # Unit Vectors in Stage Coordinate System
+        Vec_t_1_N = Delta_t_1_N
+
+        Vec_t_3 = npdn.np.cross(Delta_t_1_N, Delta_t_2_N)
+        Vec_t_3_N = self.Normalize_Vec(Vec_t_3)
+
+        Vec_t_2 = npdn.np.cross(Vec_t_3_N, Vec_t_1_N)
+        Vec_t_2_N = self.Normalize_Vec(Vec_t_2)
+
+        # Unit Vectors in Camera Coordinate System
+        Vec_r_1_N = Delta_r_1_N
+
+        Vec_r_3 = npdn.np.cross(Delta_r_1_N, Delta_r_2_N)
+        Vec_r_3_N = self.Normalize_Vec(Vec_r_3)
+
+        Vec_r_2 = npdn.np.cross(Vec_r_3_N, Vec_r_1_N)
+        Vec_r_2_N = self.Normalize_Vec(Vec_r_2)
+
+        # Unit Vectors Matrix (3x3) for Stage and Camera Coordinate Systems
+        Vec_t_Matrix = npdn.np.transpose(npdn.np.array([Vec_t_1_N, Vec_t_2_N, Vec_t_3_N]))
+        Vec_r_Matrix = npdn.np.transpose(npdn.np.array([Vec_r_1_N, Vec_r_2_N, Vec_r_3_N]))
+
+        RotationMatrix3D = npdn.np.dot(Vec_t_Matrix, npdn.np.transpose(Vec_r_Matrix))
+
+        return RotationMatrix3D
+
+    def calculate_fine_matrix(self, point_1, point_2, point_3, point_1_mica, point_2_mica, point_3_mica):
+        """This method is an incorporation of numpy methods in OAD from python numpy methods to calculate 3D matrix.
+
+        Input Arguments:
+        point_1 must be list
+        point_2 must be list
+        point_3 must be list
+        point_1_mica must be list
+        point_2_mica must be list
+        point_3_mica must be list
+        Returns: fine matrix as a NumpyDotNetArray
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+        # first_vector = first vector in grain and mica frame of reference
+        # second_vector = second vector in grain and mica frame of reference
+        # third_vector_grain = first grain vector in stage frame of reference
+        # fourth_vector_grain = second grain vector in stage frame of reference
+        # third_vector_mica = first mica vector in stage frame of reference
+        # fourth_vector_mica = second mica vector in stage frame of reference
+
+        distance_p2_p1_y = abs(point_2[1] - point_1[1])
+        distance_p3_p1_y = abs(point_3[1] - point_1[1])
+        distance_p1_p2 = math.sqrt(
+            ((point_1[0] - point_2[0]) ** 2) + ((point_1[1] - point_2[1]) ** 2) + ((point_1[2] - point_2[2]) ** 2))
+        if distance_p2_p1_y &lt;= distance_p3_p1_y:
+            first_vector = npdn.np.asarray([distance_p1_p2, 0, 0])
+        else:
+            first_vector = npdn.np.asarray([0, distance_p1_p2, 0])
+        p3p2 = point_3 - point_2
+        p1p2 = point_1 - point_2
+        p3_prime = point_2 + npdn.np.dot(p3p2, p1p2) / npdn.np.dot(p1p2, p1p2) * p1p2
+
+        distance_p2_p3_prime = npdn.np.sqrt(
+            (p3_prime[0] - point_2[0]) ** 2 + (p3_prime[1] - point_2[1]) ** 2 + (p3_prime[2] - point_2[2]) ** 2)
+        distance_p3_p3_prime = npdn.np.sqrt(
+            (p3_prime[0] - point_3[0]) ** 2 + (p3_prime[1] - point_3[1]) ** 2 + (p3_prime[2] - point_3[2]) ** 2)
+
+        if distance_p2_p1_y &lt;= distance_p3_p1_y:
+            second_vector = npdn.np.asarray([float(distance_p2_p3_prime[0]), float(distance_p3_p3_prime[0]), 0])
+        else:
+            second_vector = npdn.np.asarray([float(distance_p3_p3_prime[0]), float(distance_p2_p3_prime[0]), 0])
+
+        third_vector_grain = point_1 - point_2
+        fourth_vector_grain = point_3 - point_2
+        third_vector_mica = point_1_mica - point_2_mica
+        fourth_vector_mica = point_3_mica - point_2_mica
+
+        RotationMatrix3D_grain = self.RotationMatrix3D_Calc(first_vector, third_vector_grain, second_vector,
+                                                            fourth_vector_grain)
+        RotationMatrix3D_mica = self.RotationMatrix3D_Calc(third_vector_mica, first_vector, fourth_vector_mica,
+                                                           second_vector)
+
+        fine_matrix = npdn.np.matmul(RotationMatrix3D_mica, RotationMatrix3D_grain)
+
+        return fine_matrix
+
+    def multiply_coarse_matrix(self, pinpoints_list, coarse_matrix, point_grain_x, point_grain_y):
+        """This method multiplies the pin-point coordinates with the coarse matrix.
+
+        Input Arguments:
+        pinpoints_list must be list
+        coarse_matrix must be list -&gt;() NumpyDotNetArray
+        point_grain_x must be float
+        point_grain_y must be float
+        Returns: relative new stage position as a list.
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+
+        clone_coarse_matrix = coarse_matrix.Copy()
+
+        point_mount = npdn.np.asarray([pinpoints_list["mount"]["calibration"][1]["x"],
+                                       pinpoints_list["mount"]["calibration"][1][
+                                           "y"]])  # np.asarray(json.loads(sys.argv[1]))
+        point_mica = npdn.np.asarray([pinpoints_list["mica"]["calibration"][1]["x"],
+                                      pinpoints_list["mica"]["calibration"][1][
+                                          "y"]])  # np.asarray(json.loads(sys.argv[4]))
+        point_grain = npdn.np.asarray([point_grain_x, point_grain_y])
+
+        return npdn.np.matmul(clone_coarse_matrix, point_grain - point_mount) + point_mica
+
+    def multiply_fine_matrix(self, fine_points_list, fine_matrix, point_grain_x, point_grain_y, point_grain_z):
+        """This method multiplies a certain stage position with the fine calibration matrix.
+
+        Input Arguments:
+        fine_points_list must be list
+        fine_matrix must be list -&gt;() NumpyDotNetArray
+        point_grain_x must be float
+        point_grain_y must be float
+        point_grain_z must be float
+        Returns: the new coordinates on the mica as a list.
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+
+        if type(fine_matrix) == list:
+            fine_matrix = npdn.np.asarray([fine_matrix])
+        clone_fine_matrix = fine_matrix.Copy()
+
+        point_mount = npdn.np.asarray([fine_points_list["mount"]["calibration"][1]["x"],
+                                       fine_points_list["mount"]["calibration"][1]["y"],
+                                       fine_points_list["mount"]["calibration"][1]["z"]])  # np.asarray(json.loads(sys.argv[1]))
+        point_mica = npdn.np.asarray([fine_points_list["mica"]["calibration"][1]["x"],
+                                      fine_points_list["mica"]["calibration"][1]["y"],
+                                      fine_points_list["mica"]["calibration"][1]["z"]])  # np.asarray(json.loads(sys.argv[4]))
+        point_grain = npdn.np.asarray([point_grain_x, point_grain_y, point_grain_z])
+        return npdn.np.matmul(clone_fine_matrix, point_grain - point_mount) + point_mica
+
+    def transposeMatrix(self, m):
+        """This method transpose the input matrix.
+
+        Input Arguments: m must be 2D array
+        Returns: input matrix with its axes permuted as NumpyDotNetArray.
+        """
+
+        return map(list, zip(*m))
+
+    def getMatrixMinor(self, m, i, j):
+        """This method multiplies the inverse of the matrix by the determinant.
+
+        Input Arguments:
+        m must be 2D array
+        i must be integer
+        j must be integer
+        Returns: the minor of the input 2D matrix as an array
+        """
+
+        return [row[:j] + row[j + 1:] for row in (m[:i] + m[i + 1:])]
+
+    def getMatrixDeterminant(self, m):
+        """This method calculates the determinant for the input matrix.
+
+        Input Arguments: m must be 2D array
+        Returns: the determinant as an integer.
+        """
+
+        # base case for 2x2 matrix
+        if len(m) == 2:
+            return m[0][0] * m[1][1] - m[0][1] * m[1][0]
+
+        determinant = 0
+        for c in range(len(m)):
+            determinant += ((-1) ** c) * m[0][c] * self.getMatrixDeterminant(self.getMatrixMinor(m, 0, c))
+        return determinant
+
+    def getMatrixInverse(self, m):
+        """This method inverts the input matrix .
+
+        Input Arguments: m must be 2D array
+        Returns: the inverse of the input matrix as a 2D array
+        """
+
+        determinant = float(self.getMatrixDeterminant(m))
+        # special case for 2x2 matrix:
+        if len(m) == 2:
+            return [[m[1][1] / determinant, -1 * m[0][1] / determinant],
+                    [-1 * m[1][0] / determinant, m[0][0] / determinant]]
+
+        # find matrix of cofactors
+        cofactors = []
+        for r in range(len(m)):
+            cofactorRow = []
+            for c in range(len(m)):
+                minor = self.getMatrixMinor(m, r, c)
+                cofactorRow.append(((-1) ** (r + c)) * self.getMatrixDeterminant(minor))
+            cofactors.append(cofactorRow)
+        cofactors = self.transposeMatrix(cofactors)
+        for r in range(len(cofactors)):
+            for c in range(len(cofactors)):
+                cofactors[r][c] = cofactors[r][c] / determinant
+        return cofactors
+
+    def start2D(self, pinpoints_list):
+        """This method collect the points from the XmlCziParser and compute the 2D calibration matrix.
+
+        Input Arguments: pinpoints_list must be list
+        Returns: 2D matrix as an NumpyDotNetArray -&gt;() list
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+
+        coarse_matrix_inv = []
+        point_1_mount = npdn.np.asarray([pinpoints_list["mount"]["calibration"][0]["x"],
+                                         pinpoints_list["mount"]["calibration"][0][
+                                             "y"]])  # np.asarray(json.loads(sys.argv[1]))
+        point_2_mount = npdn.np.asarray([pinpoints_list["mount"]["calibration"][1]["x"],
+                                         pinpoints_list["mount"]["calibration"][1][
+                                             "y"]])  # np.asarray(json.loads(sys.argv[2]))
+        point_3_mount = npdn.np.asarray([pinpoints_list["mount"]["calibration"][2]["x"],
+                                         pinpoints_list["mount"]["calibration"][2][
+                                             "y"]])  # np.asarray(json.loads(sys.argv[3]))
+
+        point_1_mica = npdn.np.asarray([pinpoints_list["mica"]["calibration"][0]["x"],
+                                        pinpoints_list["mica"]["calibration"][0][
+                                            "y"]])  # np.asarray(json.loads(sys.argv[4]))
+        point_2_mica = npdn.np.asarray([pinpoints_list["mica"]["calibration"][1]["x"],
+                                        pinpoints_list["mica"]["calibration"][1][
+                                            "y"]])  # np.asarray(json.loads(sys.argv[5]))
+        point_3_mica = npdn.np.asarray([pinpoints_list["mica"]["calibration"][2]["x"],
+                                        pinpoints_list["mica"]["calibration"][2][
+                                            "y"]])  # np.asarray(json.loads(sys.argv[6]))
+
+        coarse_matrix = self.calculate_coarse_matrix(point_2_mount, point_1_mount, point_3_mount, point_2_mica,
+                                                     point_1_mica, point_3_mica)
+        for row_c in list(coarse_matrix):
+            coarse_matrix_inv.append(list(row_c))
+        coarse_matrix_inverse = npdn.np.asarray(self.getMatrixInverse(coarse_matrix_inv))
+
+        return coarse_matrix, coarse_matrix_inverse
+
+    def start3D(self, fine_list):
+        """This method computes the 3D matrix from the points collected in the _fine_calibration(self).
+
+        Input Arguments: fine_list must be list
+        Returns: the fine matrix as an NumpyDotNetArray -&gt;() list
+        """
+
+        import clr
+        import math
+        dll_name_npdn = 'NumpyDotNet'
+        clr.AddReference(dll_name_npdn)
+        import NumpyDotNet as npdn
+
+        point_1_mount = npdn.np.asarray([fine_list["mount"]["calibration"][0]["x"],
+                                         fine_list["mount"]["calibration"][0]["y"],
+                                         fine_list["mount"]["calibration"][0][
+                                             "z"]])  # np.asarray(json.loads(sys.argv[1]))
+        point_2_mount = npdn.np.asarray([fine_list["mount"]["calibration"][1]["x"],
+                                         fine_list["mount"]["calibration"][1]["y"],
+                                         fine_list["mount"]["calibration"][1][
+                                             "z"]])  # np.asarray(json.loads(sys.argv[2]))
+        point_3_mount = npdn.np.asarray([fine_list["mount"]["calibration"][2]["x"],
+                                         fine_list["mount"]["calibration"][2]["y"],
+                                         fine_list["mount"]["calibration"][2][
+                                             "z"]])  # np.asarray(json.loads(sys.argv[3]))
+
+        point_1_mica = npdn.np.asarray([fine_list["mica"]["calibration"][0]["x"],
+                                        fine_list["mica"]["calibration"][0]["y"],
+                                        fine_list["mica"]["calibration"][0][
+                                            "z"]])  # np.asarray(json.loads(sys.argv[4]))
+        point_2_mica = npdn.np.asarray([fine_list["mica"]["calibration"][1]["x"],
+                                        fine_list["mica"]["calibration"][1]["y"],
+                                        fine_list["mica"]["calibration"][1][
+                                            "z"]])  # np.asarray(json.loads(sys.argv[5]))
+        point_3_mica = npdn.np.asarray([fine_list["mica"]["calibration"][2]["x"],
+                                        fine_list["mica"]["calibration"][2]["y"],
+                                        fine_list["mica"]["calibration"][2][
+                                            "z"]])  # np.asarray(json.loads(sys.argv[6]))
+
+        fine_matrix = self.calculate_fine_matrix(point_2_mount, point_1_mount, point_3_mount, point_2_mica,
+                                                 point_1_mica, point_3_mica)
+
+        return fine_matrix
+
+
+class Calibration:
+    """Calibration class is used to perform both coarse and fine calibration if necessary(EDM on).
+
+    Methods:
+        write_to_registry(self, key, value)
+        verify_coarse_shapes(self, img)
+        collect_pinpoints(self, type, img_path, img)
+        lens_short_name(self, lens_name)
+        calculate_relative_stage_position(self, x, y, type)
+        ask_for_redo_step(self, message, type)
+        get_fine_calibration_lens(self)
+        use_inverse(self, inverse)
+        _fine_calibration()
+        fine_calibration()
+        coarse_calibration(self, ok, watch)
+        start_calibration()
+    """
+
+    def write_to_registry(self, key, value):
+        """This method creates a checkpoint for the Mount ID, and saves what has already been done.
+
+        Input Arguments:
+        key must be string
+        value must be string
+        """
+
+        from Microsoft.Win32 import Registry
+
+        fission_tracking_registry_path = "HKEY_CURRENT_USER\SOFTWARE\Carl Zeiss\Fission Tracking"
+        Registry.SetValue(fission_tracking_registry_path, key, str(value))
+
+    def verify_coarse_shapes(self, img):
+        """This method verifies if there are exactly 3 circles put on each tile image.
+
+        Input Arguments: img must be ZenImage
+        Returns: a status flag as boolean.
+        """
+
+        not_ok = True
+        if img.Graphics.Count == 3:
+            for i in range(0, img.Graphics.Count):
+                if not img.Graphics[i].Name == "Circle (Diameter)":
+                    return not_ok
+                else:
+                    not_ok = False
+        else:
+            return not_ok
+        return not_ok
+
+    def collect_pinpoints(self, type, img_path, img):
+        """This method calls the parser and gathers all the data about the coarse calibration.
+
+        Input Arguments:
+        type must be string
+        img_path must be string
+        img must be ZenImage
+        """
+
+        import time
+
+        points_collected = {}
+        pinpoint_message = type.upper() + "* : Select the pin-points on the active image using: Custom Graphics -&gt; Circle (Diameter)" + "\n" + "If Circle (Diameter) is not found in the specified tab, then use 'Customize'." + "\n" + "WARNING: Please bear in mind that the second circle must be the middle of the other two!"
+        try:
+            Zen.Application.Pause(pinpoint_message)
+            time.sleep(0.01)
+        except SystemExit:
+            warning = ZenWindow()
+            warning.Initialize('WARNING')
+            warning.AddLabel(
+                'Are you sure you want to exit? Press CANCEL\nif you want to continue or OK\nto exit the flow.')
+            result_warning = warning.Show()
+            if not result_warning.HasCanceled:
+                raise SystemExit
+
+        img.Save()
+        redo = self.verify_coarse_shapes(img)
+        if not redo:
+            img.Save()
+            points_collected["calibration"] = CziXmlParser().read_object_from_czi("coarse_calibration", img_path)
+            return points_collected
+        else:
+            img.Save()
+            self.collect_pinpoints(type, img_path, img)
+
+    def lens_short_name(self, lens_name):
+        """This method extract only the magnification &amp; amplitude part of the full lens name.
+
+        Input Arguments: lens_name must be string
+        """
+
+        if lens_name == None:
+            return None
+        else:
+            if not "/" in lens_name:
+                return None
+            else:
+                for word in lens_name.split(" "):
+                    if "/" in word:
+                        return word
+                    else:
+                        continue
+
+    def calculate_relative_stage_position(self, x, y, type):
+        """This method calculates the position in microns from pixel coordinate positions.
+
+        Input Arguments:
+        x must be float
+        y must be float
+        type must be string
+        Returns: relative stage coordinate: x, y as float.
+        """
+
+        global acquisition_informations
+
+        if type == "mount":
+            index = 0
+        elif type == "mica":
+            index = 1
+
+        value_x = x - acquisition_informations[type + "_tile_image_center"]["x"]
+        value_y = y - acquisition_informations[type + "_tile_image_center"]["y"]
+        micron_x = value_x * acquisition_informations[type + "_tile_image_center"]["scaling_x"]
+        micron_y = value_y * acquisition_informations[type + "_tile_image_center"]["scaling_y"]
+        relative_target_x = micron_x + acquisition_informations["coordinates"][index]["center"]["x"]
+        relative_target_y = micron_y + acquisition_informations["coordinates"][index]["center"]["y"]
+        return relative_target_x, relative_target_y
+
+    def ask_for_redo_step(self, message, type):
+        """This method ask the customer rather he wants or not to redo the previous step.
+
+        Input Arguments:
+        message must be string
+        type must be string
+        Returns: user's choice from the pop-up window as string.
+        """
+
+        if type == "coarse_calibration":
+            option_list = ["Yes", "No", "Let me check again"]
+        else:
+            option_list = ["Yes", "No"]
+
+        application_window = ZenWindow()
+        application_window.Initialize("Opinion")
+        application_window.AddLabel(message)
+        application_window.AddDropDown('option', 'Select your choice: ', option_list, 0)
+        application_UI = application_window.Show()
+
+        if application_UI.HasCanceled:
+            mssg = "Application canceled by User."
+            Zen.Windows.Show(mssg)
+            raise SystemExit
+
+        user_option = application_UI.GetValue('option')
+        return user_option
+
+    def get_fine_calibration_lens(self):
+        """This method gets automatically a lens with 50x magnification."""
+
+        for i in range(1, Zen.Devices.ObjectiveChanger.ItemsCount + 1):
+            lens_name = Zen.Devices.ObjectiveChanger.GetNameByPosition(i)
+            if lens_name != None:
+                if not "50x" in lens_name:
+                    continue
+                interest_index = i
+        return interest_index
+
+    def use_inverse(self, inverse):
+        """This method returns the inverse of a status flag for the fine calibration.
+
+        Input Arguments:
+        inverse must be boolean
+        Returns: negated input parameter as boolean.
+        """
+
+        return not inverse
+
+
+    def _plot_fine_calibration_set_of_points(self, set_index, mica_stage, mount_stage):
+        """This method plots the calibration points on the tile images for the fine calibration.
+
+        Input Arguments:
+        set_index must be integer
+        mica_stage must be dictionary
+        mount_stage must be dictionary
+        """
+
+        global acquisition_informations
+        import time
+
+
+        active_image = Zen.Application.Documents.GetByName(acquisition_informations["mount_tile_image_name"])
+        Zen.Application.Documents.ActiveDocument = active_image
+        time.sleep(1)
+        active_image = Zen.Application.Documents.ActiveDocument
+        active_image.Save()
+        plot_index = active_image.Graphics.Count
+
+        target_x_mount = (float(mount_stage["x"]) - acquisition_informations["coordinates"][0]["center"][
+            "x"]) / active_image.Scaling.X + float(acquisition_informations["mount_tile_image_center"]["x"])
+        target_y_mount = (float(mount_stage["y"]) - acquisition_informations["coordinates"][0]["center"][
+            "y"]) / active_image.Scaling.Y + float(acquisition_informations["mount_tile_image_center"]["y"])
+        """
+        textbox = ZenGraphicCategory.TextBox
+        active_image.Graphics.Add(textbox)
+        active_image.Graphics[plot_index].SetBounds(target_x_mount, target_y_mount, int(400), int(300))
+        active_image.Graphics[plot_index].FontSize = 50
+        active_image.Graphics[plot_index].CustomText = "C" + str(set_index + 1)
+        active_image.Save()
+        """
+        textbox = active_image.Graphics.Add(ZenGraphicCategory.TextBox)
+        textbox.SetBounds(target_x_mount, target_y_mount, int(400), int(300))
+        textbox.FontSize = 50
+        textbox.Text = "C" + str(set_index + 1)
+        active_image.Save()
+
+        time.sleep(1)
+        active_image = Zen.Application.Documents.GetByName(acquisition_informations["mica_tile_image_name"])
+        Zen.Application.Documents.ActiveDocument = active_image
+        time.sleep(1)
+        active_image = Zen.Application.Documents.ActiveDocument
+        active_image.Save()
+        plot_index = active_image.Graphics.Count
+        target_x_mica = (float(mica_stage["x"]) - acquisition_informations["coordinates"][1]["center"][
+            "x"]) / active_image.Scaling.X + float(acquisition_informations["mica_tile_image_center"]["x"])
+        target_y_mica = (float(mica_stage["y"]) - acquisition_informations["coordinates"][1]["center"][
+            "y"]) / active_image.Scaling.Y + float(acquisition_informations["mica_tile_image_center"]["y"])
+        """
+        textbox = ZenGraphicCategory.TextBox
+        active_image.Graphics.Add(textbox)
+        active_image.Graphics[plot_index].SetBounds(target_x_mica, target_y_mica, int(400), int(300))
+        active_image.Graphics[plot_index].FontSize = 50
+        active_image.Graphics[plot_index].CustomText = "C" + str(set_index + 1) + "'"
+        active_image.Save()"""
+        textbox = active_image.Graphics.Add(ZenGraphicCategory.TextBox)
+        textbox.SetBounds(target_x_mica, target_y_mica, int(400), int(300))
+        textbox.FontSize = 50
+        textbox.Text = "C" + str(set_index + 1) + "'"
+        active_image.Save()
+
+
+    def _fine_calibration(self):
+        """This method does all the steps to get the fine calibration points."""
+
+        global acquisition_informations
+        global fine_informations
+
+        sufix = ""
+        repeat = True
+        inverse = True
+        actual_index = 0
+        steps_count = 1
+        point_mica = []
+        point_mount = []
+        temp_fine = {}
+        z_mi = 0
+        z_mo = 0
+        current_temp_mica = {}
+        current_temp_mount = {}
+        fine_informations = {}
+
+        fine_informations_mount = {"calibration": [None, None, None]}
+        fine_informations_mica = {"calibration": [None, None, None]}
+        list_of_interest = acquisition_informations["coarse_calibration"]["mica"]["calibration"]
+
+        new_experiment = Zen.Acquisition.Experiments.ActiveExperiment
+
+        while repeat:
+            if actual_index == 0:
+                sufix = "1st"
+            elif actual_index == 1:
+                sufix = "2nd"
+            elif actual_index == 2:
+                sufix = "3rd"
+            if steps_count == 1:
+                pause_mssg = "MICA* : You are now at " + sufix + " pinpoint. Adjust your focus then select \nthe grain you want for the fine calibration"
+                Zen.Devices.Stage.MoveTo(float(list_of_interest[actual_index]["x"]),
+                                         float(list_of_interest[actual_index]["y"]))
+                if z_mi:
+                    Zen.Devices.Focus.TargetPosition = z_mi
+                    Zen.Devices.Focus.Apply()
+            elif steps_count &gt; 1 and inverse == True:
+                pause_mssg = "MICA* : You are now at " + sufix + " pinpoint. \nIs this the grain you selected for the fine calibration on mount?\nAdjust your focus, if required."
+                Zen.Devices.Stage.MoveTo(point_mica[0], point_mica[1])
+                Zen.Devices.Focus.TargetPosition = z_mi
+                Zen.Devices.Focus.Apply()
+            elif steps_count &gt; 1 and inverse == False:
+                pause_mssg = "MOUNT* : You are now at " + sufix + " pinpoint. \nIs this the grain you selected for the fine calibration on mica?\nAdjust your focus, if required."
+                Zen.Devices.Stage.MoveTo(point_mount[0], point_mount[1])
+                if z_mo:
+                    Zen.Devices.Focus.TargetPosition = z_mo
+                    Zen.Devices.Focus.Apply()
+
+            Zen.Acquisition.StartLive(new_experiment)
+
+            Zen.Application.Pause(pause_mssg)
+
+            if inverse:
+                current_temp_mica["x"] = Zen.Devices.Stage.ActualPositionX
+                current_temp_mica["y"] = Zen.Devices.Stage.ActualPositionY
+                current_temp_mica["z"] = Zen.Devices.Focus.ActualPosition
+                point_mount = CalibrationCalculus().multiply_coarse_matrix(
+                    acquisition_informations["coarse_calibration"],
+                    acquisition_informations["calibration_matrix_inverse"],
+                    current_temp_mica["x"], current_temp_mica["y"])
+                z_mi = current_temp_mica["z"]
+            else:
+                current_temp_mount["x"] = Zen.Devices.Stage.ActualPositionX
+                current_temp_mount["y"] = Zen.Devices.Stage.ActualPositionY
+                current_temp_mount["z"] = Zen.Devices.Focus.ActualPosition
+                point_mica = CalibrationCalculus().multiply_coarse_matrix(
+                    acquisition_informations["coarse_calibration"],
+                    acquisition_informations["calibration_matrix"],
+                    current_temp_mount["x"], current_temp_mount["y"])
+                z_mo = current_temp_mount["z"]
+
+            if Zen.Acquisition.IsLiveRunning:
+                Zen.Acquisition.StopLive(new_experiment)
+            if steps_count % 2 == 0:
+                warning = ZenWindow()
+                warning.Initialize(sufix + " Set of points")
+                warning.AddLabel(
+                    'Do you want repeat this step for the current set of points?\n*OK - Repeat step for current set of points\n*CANCEL - Redirect to the next set of points.')
+                result_warning = warning.Show()
+                if result_warning.HasCanceled:
+                    repeat = self.use_inverse(repeat)
+            if inverse:
+                fine_informations_mica["calibration"].pop(actual_index)
+                fine_informations_mica["calibration"].insert(actual_index, current_temp_mica)
+            else:
+                fine_informations_mount["calibration"].pop(actual_index)
+                fine_informations_mount["calibration"].insert(actual_index, current_temp_mount)
+
+            steps_count += 1
+            inverse = self.use_inverse(inverse)
+            if repeat == False:
+                self._plot_fine_calibration_set_of_points(actual_index, current_temp_mica, current_temp_mount)
+                fine_informations_mica["calibration"].pop(actual_index)
+                fine_informations_mica["calibration"].insert(actual_index, current_temp_mica)
+                fine_informations_mount["calibration"].pop(actual_index)
+                fine_informations_mount["calibration"].insert(actual_index, current_temp_mount)
+                steps_count = 1
+                actual_index += 1
+                current_temp_mount = {}
+                current_temp_mica = {}
+                if actual_index &lt; len(list_of_interest):
+                    repeat = self.use_inverse(repeat)
+        temp_fine["mica"] = fine_informations_mica
+        temp_fine["mount"] = fine_informations_mount
+
+        fine_informations = temp_fine
+
+
+    def fine_calibration(self):
+        """This method ."""
+
+        # global acquisition_informations
+        global fine_informations
+        import time
+
+        pass
+
+        # experiment = Zen.Acquisition.Experiments.GetByName(acquisition_informations["experiments"]["mount_overview"])
+
+        # acquisition_informations["calibration_matrix"], acquisition_informations["calibration_matrix_inverse"]
+
+    def coarse_calibration(self, ok, watch):
+        """This method gets all the steps we need to do the coarse calibration.
+
+        Input Arguments:
+        ok must be boolean
+        watch must be boolean
+        """
+
+        global acquisition_informations
+        global coarse_informations
+        import time
+
+        coarse_message = "Are you ok with the coarse calibration points?"
+
+        if watch:
+            coarse_informations = {}
+            try:
+                Zen.Application.Pause(
+                    "Look at the calibration points on\n both overview images, if they are plotted corectly\n Press 'Continue' to make your choice.")
+                time.sleep(0.01)
+            except SystemExit:
+                warning = ZenWindow()
+                warning.Initialize('WARNING')
+                warning.AddLabel(
+                    'Are you sure you want to exit? Press CANCEL\nif you want to continue or OK\nto exit the flow.')
+                result_warning = warning.Show()
+                if not result_warning.HasCanceled:
+                    raise SystemExit
+            medium_resolution_mount_img = Zen.Application.Documents.GetByName(
+                acquisition_informations["mount_tile_image_name"])
+            medium_resolution_mount_img.Save()
+            Zen.Application.Documents.ActiveDocument = medium_resolution_mount_img
+            coarse_informations["mount"] = {"calibration": CziXmlParser().read_object_from_czi("coarse_calibration",
+                                                                                               acquisition_informations[
+                                                                                                   "mount_tile_image"])}
+
+            for item in coarse_informations["mount"]["calibration"]:
+                item["x"], item["y"] = self.calculate_relative_stage_position(item["x"], item["y"], "mount")
+            time.sleep(1)
+
+            medium_resolution_mica_img = Zen.Application.Documents.GetByName(
+                acquisition_informations["mica_tile_image_name"])
+            medium_resolution_mica_img.Save()
+            Zen.Application.Documents.ActiveDocument = medium_resolution_mica_img
+            coarse_informations["mica"] = {"calibration": CziXmlParser().read_object_from_czi("coarse_calibration",
+                                                                                              acquisition_informations[
+                                                                                                  "mica_tile_image"])}
+
+            for item in coarse_informations["mica"]["calibration"]:
+                item["x"], item["y"] = self.calculate_relative_stage_position(item["x"], item["y"], "mica")
+        else:
+            coarse_informations = {}
+
+            medium_resolution_mount_img = Zen.Application.Documents.GetByName(
+                acquisition_informations["mount_tile_image_name"])
+            if not ok:
+                medium_resolution_mount_img.Graphics.Clear()
+                medium_resolution_mount_img.Save()
+            Zen.Application.Documents.ActiveDocument = medium_resolution_mount_img
+            coarse_informations["mount"] = self.collect_pinpoints("mount-calibration",
+                                                                  acquisition_informations["mount_tile_image"],
+                                                                  medium_resolution_mount_img)
+            for item in coarse_informations["mount"]["calibration"]:
+                item["x"], item["y"] = self.calculate_relative_stage_position(item["x"], item["y"], "mount")
+            time.sleep(1)
+
+            medium_resolution_mica_img = Zen.Application.Documents.GetByName(
+                acquisition_informations["mica_tile_image_name"])
+            if not ok:
+                medium_resolution_mica_img.Graphics.Clear()
+                medium_resolution_mica_img.Save()
+            Zen.Application.Documents.ActiveDocument = medium_resolution_mica_img
+            coarse_informations["mica"] = self.collect_pinpoints("mica-calibration",
+                                                                 acquisition_informations["mica_tile_image"],
+                                                                 medium_resolution_mica_img)
+            for item in coarse_informations["mica"]["calibration"]:
+                item["x"], item["y"] = self.calculate_relative_stage_position(item["x"], item["y"], "mica")
+
+        answer = self.ask_for_redo_step(coarse_message, "coarse_calibration")
+
+        if answer == "Yes":
+            coarse_informations = coarse_informations
+        elif answer == "No":
+            self.coarse_calibration(ok=False, watch=False)
+        elif answer == "Let me check again":
+            self.coarse_calibration(ok=None, watch=True)
+
+    def start_calibration(self):
+        """This method starts the whole procedure of calibration between mount &amp; mica (EDM on)."""
+
+        global acquisition_informations
+        global coarse_informations
+        global fine_informations
+        import time
+
+        coarse_matrix = []
+        coarse_matrix_inv = []
+        fine_matrix = []
+        self.coarse_calibration(ok=True, watch=False)
+        acquisition_informations["coarse_calibration"] = coarse_informations
+
+        acquisition_informations["calibration_matrix"], acquisition_informations[
+            "calibration_matrix_inverse"] = CalibrationCalculus().start2D(
+            acquisition_informations["coarse_calibration"])
+
+        self._fine_calibration()
+        acquisition_informations["fine_calibration"] = fine_informations
+
+        acquisition_informations["fine_matrix"] = CalibrationCalculus().start3D(
+            acquisition_informations["fine_calibration"])
+
+        for row_c in list(acquisition_informations["calibration_matrix"]):
+            coarse_matrix.append(list(row_c))
+        acquisition_informations["calibration_matrix"] = coarse_matrix
+        for row_ci in list(acquisition_informations["calibration_matrix_inverse"]):
+            coarse_matrix_inv.append(list(row_ci))
+        acquisition_informations["calibration_matrix_inverse"] = coarse_matrix_inv
+        for row_f in list(acquisition_informations["fine_matrix"]):
+            fine_matrix.append(list(row_f))
+        acquisition_informations["fine_matrix"] = fine_matrix
+
+        self.write_to_registry(acquisition_informations["mount_id"], acquisition_informations)
+        time.sleep(1)
+
+        AcquisitionSuit().grain_management(None)
+
+
+class AcquisitionSuit:
+    """AcquisitionSuit class is used to group every method and function relevant for the grain acquisition.
+
+    Methods:
+        define_grain_index(self, img)
+        plot_position_on_tile(self, image_name, stage)
+        make_directory(self, parent_dir, child_dir)
+        acquire_new_grain(self, index, detector)
+        delete_previous_plot(self, img, id)
+        replot_grain_to_image(self, image_name, stage, grain_id)
+        reacquire(self, grain_name, detector)
+        reacquire_grain(self, option_name, watch)
+        grain_acquisition_steps(self, option, count)
+        read_directory()
+        delete_id_plot(self, id)
+        validate(self, subfolder)
+        post_processing()
+        grain_management(self, condition)
+    """
+
+    def define_grain_index(self, img):
+        """This method calculates the index of the current grain.
+
+        Input Arguments: img must be ZenImage
+        Returns: count of the already acquired grains as integer.
+        """
+
+        count = 0
+        scenes = img.Bounds.SizeS
+        for scene in range(0, scenes):
+            scene_image = img
+            for i in range(0, scene_image.Graphics.Count):
+                graphic = scene_image.Graphics[i]
+                graphic.IsMeasurementVisible = True
+                if graphic.Name == "Text" and "x G" in graphic.Text:
+                    count += 1
+        return count
+
+    def plot_position_on_tile(self, image_name, stage):
+        """This method plots the current grain position on the tile images both, only if EDM is on.
+
+        Input Arguments:
+        image_name must be string
+        stage must be dictionary
+        """
+
+        import time
+
+        active_image = Zen.Application.Documents.GetByName(image_name)
+        Zen.Application.Documents.ActiveDocument = active_image
+        time.sleep(1)
+        active_image = Zen.Application.Documents.ActiveDocument
+        active_image.Save()
+        plot_index = active_image.Graphics.Count
+        grain_index = self.define_grain_index(active_image)
+        if "mount" in image_name:
+            target_x = (float(stage["x"]) - acquisition_informations["coordinates"][0]["center"][
+                "x"]) / active_image.Scaling.X + float(acquisition_informations["mount_tile_image_center"]["x"])
+            target_y = (float(stage["y"]) - acquisition_informations["coordinates"][0]["center"][
+                "y"]) / active_image.Scaling.Y + float(acquisition_informations["mount_tile_image_center"]["y"])
+        else:
+            target_x = (float(stage["x"]) - acquisition_informations["coordinates"][1]["center"][
+                "x"]) / active_image.Scaling.X + float(acquisition_informations["mica_tile_image_center"]["x"])
+            target_y = (float(stage["y"]) - acquisition_informations["coordinates"][1]["center"][
+                "y"]) / active_image.Scaling.Y + float(acquisition_informations["mica_tile_image_center"]["y"])
+        time.sleep(1)
+        """
+        textbox = ZenGraphicCategory.TextBox
+        active_image.Graphics.Add(textbox)
+        active_image.Graphics[plot_index].SetBounds(target_x, target_y, int(400), int(300))
+        active_image.Graphics[plot_index].FontSize = 50
+        active_image.Graphics[plot_index].CustomText = "x G" + str(grain_index + 1)
+        active_image.Save()"""
+        textbox = active_image.Graphics.Add(ZenGraphicCategory.TextBox)
+        textbox.SetBounds(target_x, target_y, int(400), int(300))
+        textbox.FontSize = 50
+        textbox.Text = "x G" + str(grain_index + 1)
+        active_image.Save()
+
+    def make_directory(self, parent_dir, child_dir):
+        """This method creates a directory if we acquire a new grain.
+
+        Input Arguments:
+        parent_dir must be string
+        child_dir must be string
+        Returns: the new path that was created as string
+        """
+
+        import os
+
+        path = os.path.join(parent_dir, child_dir)
+        os.mkdir(path)
+        return path
+
+    def use_EDF(self, reflected_stack):
+        """EDF method is used to stitch the reflected stack layers into a single image.
+
+        Input Arguments:
+        reflected_stack must be ZenImage
+        Returns: reflected image processed by EDF as a ZenImage.
+        """
+        # 1st steps to define de processing settings and parameters for the image
+        processing_setting = Zen.Processing.Filter.Settings.EDFSetting()
+        processing_setting.Method = ZenExtendedFocusMethod.Wavelets
+        processing_setting.WaveletSetting.ZStackAlignment = ZenAlignmentQuality.NoAlignment
+
+        # 2nd step is to create the image object, using the defined settings above
+        reflected_stack_EDF = Zen.Processing.Filter.Sharpen.EDF(reflected_stack, processing_setting)
+        return reflected_stack_EDF
+
+
+    def acquire_new_grain(self, index, detector):
+        """This method covers step by step, with pop-up windows, the acquisition of a new grain.
+
+        Input Arguments:
+        index must be integer
+        detector must be boolean
+        """
+
+        global acquisition_informations
+        import time
+
+        grain_info = {}
+        useful_info = {}
+        grain_name = "Grain_" + str(index)
+        grain_info["id"] = grain_name
+        output_folder = self.make_directory(acquisition_informations["output_path"], grain_name)
+        experiment_OV = Zen.Acquisition.Experiments.GetByName(acquisition_informations["experiments"]["mount_overview"])
+        experiment_OV.SetActive()
+
+        Zen.Application.Pause(
+            "MOUNT* : Please, start live, navigate to the grain you want to acquire on the mount!" + '\n' + "Also, focus a bit if required! ")
+
+        useful_info["stage"] = {"x": Zen.Devices.Stage.ActualPositionX, "y": Zen.Devices.Stage.ActualPositionY,
+                                "z": Zen.Devices.Focus.ActualPosition}
+        if Zen.Acquisition.IsLiveRunning:
+            Zen.Acquisition.StopLive(experiment_OV)
+        self.plot_position_on_tile(acquisition_informations["mount_tile_image_name"], useful_info["stage"])
+        time.sleep(1)
+        experiment_RL = Zen.Acquisition.Experiments.GetByName(
+            acquisition_informations["experiments"]["mount_reflective"])
+        experiment_RL.SetActive()
+
+        Zen.Application.Pause("MOUNT* : Please, start live and focus on surface!")
+
+        useful_info["z0"] = Zen.Devices.Focus.ActualPosition
+        if Zen.Acquisition.IsLiveRunning:
+            Zen.Acquisition.StopLive(experiment_RL)
+        experiment_TL = Zen.Acquisition.Experiments.GetByName(
+            acquisition_informations["experiments"]["mount_transmissive"])
+        experiment_TL.SetActive()
+
+        Zen.Application.Pause("MOUNT* : Please, start live and focus on bottom of slide!")
+
+        useful_info["z1"] = Zen.Devices.Focus.ActualPosition
+        if Zen.Acquisition.IsLiveRunning:
+            Zen.Acquisition.StopLive(experiment_TL)
+        mount_images_path = self.make_directory(output_folder, "Mount")
+        # verify the experiments
+        active_experiment = Zen.Acquisition.Experiments.ActiveExperiment
+        if experiment_TL.FileName.Split('\\')[-1] != active_experiment.FileName.Split('\\')[-1]:
+            active_experiment.SetActive()
+            Zen.Application.Pause(
+                "ATTENTION*: Your z-stack will be acquired with" + active_experiment.FileName.Split('\\')[-1] + "!")
+
+            zstack_experiment = CziXmlParser().set_zstack_experiment(active_experiment, useful_info["z0"],
+                                                                     useful_info["z1"])
+            mount_stack = Zen.Acquisition.Execute(zstack_experiment)
+            zstack_experiment.Delete()
+            time.sleep(1)
+        else:
+            zstack_experiment = CziXmlParser().set_zstack_experiment(experiment_TL, useful_info["z0"],
+                                                                     useful_info["z1"])
+            mount_stack = Zen.Acquisition.Execute(zstack_experiment)
+            time.sleep(1)
+            zstack_experiment.Delete()
+        mount_stack_name = "Mount_" + str(index) + "_Stack_TL"
+        mount_stack_location = mount_images_path + "\\" + mount_stack_name + ".czi"
+        Zen.Application.Save(mount_stack, mount_stack_location, False)
+        useful_info["mount_stack"] = mount_stack.FileName
+        time.sleep(1)
+        experiment_RL = Zen.Acquisition.Experiments.GetByName(
+            acquisition_informations["experiments"]["mount_reflective"])
+        experiment_RL.SetActive()
+
+        #zstack_experiment = CziXmlParser().set_zstack_experiment(experiment_RL, useful_info["z0"], useful_info["z1"])
+        #time.sleep(1)
+        #reflected_image = self.use_EDF(Zen.Acquisition.Execute(zstack_experiment))
+        #zstack_experiment.Delete()
+        Zen.Devices.Focus.MoveTo(useful_info["z0"])
+        reflected_image = Zen.Acquisition.AcquireImage(experiment_RL)
+        Zen.Application.Documents.Add(reflected_image)
+        reflected_image_name = "reflected_image"
+        reflected_image_location = mount_images_path + "\\" + reflected_image_name + ".czi"
+        Zen.Application.Save(reflected_image, reflected_image_location, False)
+        useful_info["reflected_image"] = reflected_image.FileName
+        useful_info["grain_path"] = output_folder
+        if not detector:
+            grain_info["mount"] = useful_info
+            acquisition_informations["grains_acquired"].append(grain_info)
+            Calibration().write_to_registry(acquisition_informations["mount_id"], acquisition_informations)
+
+            Zen.Application.Pause(
+                "Acquisition for this grain has finished, \ncheck the acquired images, then hit 'Continue'!")
+
+            Zen.Application.Documents.SaveAll()
+            Zen.Application.Documents.Remove(mount_stack)
+            Zen.Application.Documents.Remove(reflected_image)
+            self.grain_management(None)
+        else:
+            grain_info["mount"] = useful_info
+            useful_info = {}
+            point_mica = CalibrationCalculus().multiply_fine_matrix(acquisition_informations["fine_calibration"],
+                                                                    acquisition_informations["fine_matrix"],
+                                                                    grain_info["mount"]["stage"]["x"],
+                                                                    grain_info["mount"]["stage"]["y"],
+                                                                    grain_info["mount"]["stage"]["z"])
+            Zen.Devices.Stage.MoveTo(point_mica[0], point_mica[1])
+
+            Zen.Devices.Stage.Apply()
+            time.sleep(1)
+            Zen.Devices.Focus.TargetPosition = point_mica[2]
+            Zen.Devices.Focus.Apply()
+            experiment_OV = Zen.Acquisition.Experiments.GetByName(
+                acquisition_informations["experiments"]["mica_overview"])
+            experiment_OV.SetActive()
+
+            Zen.Application.Pause(
+                "MICA* : Start live, adjust your position on the grain you want to acquire on the mica!" + '\n' + "Also, focus a bit if required! ")
+
+            useful_info["stage"] = {"x": Zen.Devices.Stage.ActualPositionX, "y": Zen.Devices.Stage.ActualPositionY}
+            if Zen.Acquisition.IsLiveRunning:
+                Zen.Acquisition.StopLive(experiment_OV)
+            self.plot_position_on_tile(acquisition_informations["mica_tile_image_name"], useful_info["stage"])
+            time.sleep(1)
+            experiment_RL = Zen.Acquisition.Experiments.GetByName(
+                acquisition_informations["experiments"]["mica_reflective"])
+            experiment_RL.SetActive()
+
+            Zen.Application.Pause("MICA* : Please, start live focus on surface!")
+
+            useful_info["z0"] = Zen.Devices.Focus.ActualPosition
+            if Zen.Acquisition.IsLiveRunning:
+                Zen.Acquisition.StopLive(experiment_RL)
+            experiment_TL = Zen.Acquisition.Experiments.GetByName(
+                acquisition_informations["experiments"]["mica_transmissive"])
+            experiment_TL.SetActive()
+
+            Zen.Application.Pause("MICA* : Please, start live and focus on bottom of slide!")
+
+            useful_info["z1"] = Zen.Devices.Focus.ActualPosition
+            if Zen.Acquisition.IsLiveRunning:
+                Zen.Acquisition.StopLive(experiment_TL)
+            time.sleep(1)
+            mica_images_path = self.make_directory(output_folder, "Mica")
+            # verify the experiments
+            active_experiment = Zen.Acquisition.Experiments.ActiveExperiment
+            if experiment_TL.FileName.Split('\\')[-1] != active_experiment.FileName.Split('\\')[-1]:
+                active_experiment.SetActive()
+
+                Zen.Application.Pause(
+                    "*ATTENTION*: Your z-stack will be acquired with" + active_experiment.FileName.Split('\\')[
+                        -1] + "!")
+
+                zstack_experiment = CziXmlParser().set_zstack_experiment(active_experiment, useful_info["z0"],
+                                                                         useful_info["z1"])
+                mica_stack = Zen.Acquisition.Execute(zstack_experiment)
+                time.sleep(1)
+                zstack_experiment.Delete()
+            else:
+                zstack_experiment = CziXmlParser().set_zstack_experiment(experiment_TL, useful_info["z0"],
+                                                                         useful_info["z1"])
+                mica_stack = Zen.Acquisition.Execute(zstack_experiment)
+                time.sleep(1)
+                zstack_experiment.Delete()
+            mica_stack_name = "Mica_" + str(index) + "_Stack_TL"
+            mica_stack_location = mica_images_path + "\\" + mica_stack_name + ".czi"
+            Zen.Application.Save(mica_stack, mica_stack_location, False)
+            useful_info["mica_stack"] = mica_stack.FileName
+
+            # Reflected image acquisition
+            experiment_RL = Zen.Acquisition.Experiments.GetByName(
+            acquisition_informations["experiments"]["mica_reflective"])
+            experiment_RL.SetActive()
+
+            #zstack_experiment = CziXmlParser().set_zstack_experiment(experiment_RL, useful_info["z0"], useful_info["z1"])
+            #time.sleep(1)
+            #reflected_image = self.use_EDF(Zen.Acquisition.Execute(zstack_experiment))
+            #Zen.Application.Documents.Add(reflected_image)
+            #zstack_experiment.Delete()
+            Zen.Devices.Focus.MoveTo(useful_info["z0"])
+            reflected_image_mi = Zen.Acquisition.AcquireImage(experiment_RL)
+            Zen.Application.Documents.Add(reflected_image_mi)
+            reflected_image_name = "r_image_mica"
+            reflected_image_location = mica_images_path + "\\" + reflected_image_name + ".czi"
+            Zen.Application.Save(reflected_image_mi, reflected_image_location, False)
+            useful_info["reflected_image"] = reflected_image_mi.FileName
+
+            grain_info["mica"] = useful_info
+            acquisition_informations["grains_acquired"].append(grain_info)
+            Calibration().write_to_registry(acquisition_informations["mount_id"], acquisition_informations)
+
+            Zen.Application.Pause("Acquisition for this grain has finished, \ncheck the acquired images, then hit 'Continue'!")
+
+            Zen.Application.Documents.SaveAll()
+            Zen.Application.Documents.Remove(mount_stack)
+            Zen.Application.Documents.Remove(reflected_image)
+            Zen.Application.Documents.Remove(mica_stack)
+            Zen.Application.Documents.Remove(reflected_image_mi)
+            self.grain_management(None)
+
+
+    def delete_previous_plot(self, img, id):
+        """This method clears the previous plot by verifying &amp; finding the previous plot text on the active image.
+
+        Input Arguments:
+        img must be ZenImage
+        id must be string
+        """
+
+        scenes = img.Bounds.SizeS
+        for scene in range(0, scenes):
+            scene_image = img
+            for i in range(0, scene_image.Graphics.Count):
+                graphic = scene_image.Graphics[i]
+                if graphic.Name == "Text" and graphic.Text == id:
+                    img.Graphics.Remove(graphic)
+                    img.Save()
+                    break
+
+    def replot_grain_to_image(self, image_name, stage, grain_id):
+        """This method re-plots the grain to it's new position.
+
+        Input Arguments:
+        image_name must be string
+        stage must be dictionary
+        grain_id must be string
+        """
+
+        import time
+        global acquisition_informations
+
+        active_image = Zen.Application.Documents.GetByName(image_name)
+        old_grain_id = "x G" + grain_id[-1]
+        Zen.Application.Documents.ActiveDocument = active_image
+        active_image = Zen.Application.Documents.ActiveDocument
+
+        self.delete_previous_plot(active_image, old_grain_id)
+        time.sleep(1)
+        active_image.Save()
+
+        new_plot_index = active_image.Graphics.Count
+
+        if "mount" in image_name:
+            target_x = (float(stage["x"]) - acquisition_informations["coordinates"][0]["center"][
+                "x"]) / active_image.Scaling.X + float(acquisition_informations["mount_tile_image_center"]["x"])
+            target_y = (float(stage["y"]) - acquisition_informations["coordinates"][0]["center"][
+                "y"]) / active_image.Scaling.Y + float(acquisition_informations["mount_tile_image_center"]["y"])
+        else:
+            target_x = (float(stage["x"]) - acquisition_informations["coordinates"][1]["center"][
+                "x"]) / active_image.Scaling.X + float(acquisition_informations["mica_tile_image_center"]["x"])
+            target_y = (float(stage["y"]) - acquisition_informations["coordinates"][1]["center"][
+                "y"]) / active_image.Scaling.Y + float(acquisition_informations["mica_tile_image_center"]["y"])
+        time.sleep(1)
+        """
+        textbox = ZenGraphicCategory.TextBox
+        active_image.Graphics.Add(textbox)
+        active_image.Graphics[new_plot_index].SetBounds(target_x, target_y, int(400), int(300))
+        active_image.Graphics[new_plot_index].FontSize = 50
+        active_image.Graphics[new_plot_index].CustomText = old_grain_id
+        active_image.Save()"""
+        textbox = active_image.Graphics.Add(ZenGraphicCategory.TextBox)
+        textbox.SetBounds(target_x, target_y, int(400), int(300))
+        textbox.FontSize = 50
+        textbox.Text = old_grain_id
+        active_image.Save()
+
+    def reacquire(self, grain_name, detector):
+        """This method does the whole process of acquiring a new grain, for an already acquired one, and overwrites the previous.
+
+        Input Arguments:
+        grain_name must be string
+        detector must be boolean
+        """
+
+        global acquisition_informations
+        import time
+
+        grain_info = {}
+        useful_info = {}
+        grain_info["id"] = grain_name
+        for data in acquisition_informations["grains_acquired"]:
+            if data["id"] == grain_name:
+                data_index = int(acquisition_informations["grains_acquired"].index(data))
+                useful_info["stage"] = {"x": data["mount"]["stage"]["x"], "y": data["mount"]["stage"]["y"]}
+                useful_info["grain_path"] = data["mount"]["grain_path"]
+                old_z0 = data["mount"]["z0"]
+                old_z1 = data["mount"]["z1"]
+                old_mount_stack = data["mount"]["mount_stack"]
+                old_reflected_img = data["mount"]["reflected_image"]
+                if detector:
+                    old_mica_stack = data["mica"]["mica_stack"]
+                    old_mica_reflected = data["mica"]["reflected_image"]
+                    old_mica_z0 = data["mica"]["z0"]
+                    old_mica_z1 = data["mica"]["z1"]
+
+        experiment_OV = Zen.Acquisition.Experiments.GetByName(acquisition_informations["experiments"]["mount_overview"])
+        experiment_OV.SetActive()
+
+        # Move stage to the old grain position, from where the user can adjust
+        Zen.Devices.Stage.MoveTo(useful_info["stage"]["x"], useful_info["stage"]["y"])
+        time.sleep(1)
+
+        Zen.Application.Pause(
+            "*REACQUIRE " + grain_name.upper() + ": " + '\n' + "Please, start live and adjust your position on the grain and press 'Continue'")
+
+        useful_info["stage"] = {"x": Zen.Devices.Stage.ActualPositionX, "y": Zen.Devices.Stage.ActualPositionY,
+                                "z": Zen.Devices.Focus.ActualPosition}
+        self.replot_grain_to_image(acquisition_informations["mount_tile_image_name"], useful_info["stage"], grain_name)
+        if Zen.Acquisition.IsLiveRunning:
+            Zen.Acquisition.StopLive(experiment_OV)
+        time.sleep(1)
+        experiment_RL = Zen.Acquisition.Experiments.GetByName(
+            acquisition_informations["experiments"]["mount_reflective"])
+        experiment_RL.SetActive()
+        Zen.Devices.Focus.TargetPosition = old_z0
+        Zen.Devices.Focus.Apply()
+        time.sleep(1)
+        Zen.Application.Pause("MOUNT* : Please, start live and focus on surface!" + '\n' + "OLD FOCUS AT THIS STEP WAS AT: " + str(old_z0))
+
+        if Zen.Acquisition.IsLiveRunning:
+            Zen.Acquisition.StopLive(experiment_RL)
+        useful_info["z0"] = Zen.Devices.Focus.ActualPosition
+        experiment_TL = Zen.Acquisition.Experiments.GetByName(
+            acquisition_informations["experiments"]["mount_transmissive"])
+        experiment_TL.SetActive()
+        Zen.Devices.Focus.TargetPosition = old_z1
+        Zen.Devices.Focus.Apply()
+        time.sleep(1)
+        Zen.Application.Pause(
+            "MOUNT* : Please, start live and focus on bottom of slide!" + '\n' + "OLD FOCUS AT THIS STEP WAS AT: " + str(
+                old_z1))
+
+        useful_info["z1"] = Zen.Devices.Focus.ActualPosition
+        if Zen.Acquisition.IsLiveRunning:
+            Zen.Acquisition.StopLive(experiment_TL)
+        # verify the experiments
+        active_experiment = Zen.Acquisition.Experiments.ActiveExperiment
+        if experiment_TL.FileName.Split('\\')[-1] != active_experiment.FileName.Split('\\')[-1]:
+            active_experiment.SetActive()
+
+            Zen.Application.Pause(
+                "ATTENTION*: Your z-stack will be acquired with" + active_experiment.FileName.Split('\\')[-1] + "!")
+
+            zstack_experiment = CziXmlParser().set_zstack_experiment(active_experiment, useful_info["z0"],
+                                                                     useful_info["z1"])
+            mount_stack = Zen.Acquisition.Execute(zstack_experiment)
+            time.sleep(1)
+            zstack_experiment.Delete()
+        else:
+            zstack_experiment = CziXmlParser().set_zstack_experiment(experiment_TL, useful_info["z0"],
+                                                                     useful_info["z1"])
+            mount_stack = Zen.Acquisition.Execute(zstack_experiment)
+            time.sleep(1)
+            zstack_experiment.Delete()
+
+        mount_stack_location = old_mount_stack
+        Zen.Application.Save(mount_stack, mount_stack_location, False)
+        useful_info["mount_stack"] = mount_stack.FileName
+        time.sleep(1)
+        experiment_RL = Zen.Acquisition.Experiments.GetByName(
+            acquisition_informations["experiments"]["mount_reflective"])
+        experiment_RL.SetActive()
+        
+        #zstack_experiment = CziXmlParser().set_zstack_experiment(experiment_RL, useful_info["z0"], useful_info["z1"])
+        #time.sleep(1)
+        #reflected_image = self.use_EDF(Zen.Acquisition.Execute(zstack_experiment))
+        #zstack_experiment.Delete()
+
+        Zen.Devices.Focus.MoveTo(float(useful_info["z0"]))
+        reflected_image = Zen.Acquisition.AcquireImage(experiment_RL)
+        Zen.Application.Documents.Add(reflected_image)
+        reflected_image_location = old_reflected_img
+        Zen.Application.Save(reflected_image, reflected_image_location, False)
+        useful_info["reflected_image"] = reflected_image.FileName
+        time.sleep(1)
+        if not detector:
+            grain_info["mount"] = useful_info
+            acquisition_informations["grains_acquired"].pop(data_index)
+            acquisition_informations["grains_acquired"].insert(data_index, grain_info)
+            Calibration().write_to_registry(acquisition_informations["mount_id"], acquisition_informations)
+
+            Zen.Application.Pause(
+                "Acquisition for this grain has finished, \ncheck the acquired images, then hit 'Continue'!")
+
+            Zen.Application.Documents.SaveAll()
+            Zen.Application.Documents.Remove(mount_stack)
+            Zen.Application.Documents.Remove(reflected_image)
+            self.grain_management(None)
+        else:
+            grain_info["mount"] = useful_info
+            useful_info = {}
+            point_mica = CalibrationCalculus().multiply_fine_matrix(acquisition_informations["fine_calibration"],
+                                                                    acquisition_informations["fine_matrix"],
+                                                                    grain_info["mount"]["stage"]["x"],
+                                                                    grain_info["mount"]["stage"]["y"],
+                                                                    grain_info["mount"]["stage"]["z"])
+            Zen.Devices.Stage.MoveTo(point_mica[0], point_mica[1])
+
+            Zen.Devices.Stage.Apply()
+            time.sleep(1)
+            Zen.Devices.Focus.TargetPosition = point_mica[2]
+            Zen.Devices.Focus.Apply()
+            experiment_OV = Zen.Acquisition.Experiments.GetByName(
+                acquisition_informations["experiments"]["mica_overview"])
+            experiment_OV.SetActive()
+
+            Zen.Application.Pause(
+                "MICA* : Start live,then adjust your position to the " + '\n' + "grain you want to acquire on the mica!" + '\n' + "Also, focus a bit if required! ")
+
+            useful_info["stage"] = {"x": Zen.Devices.Stage.ActualPositionX, "y": Zen.Devices.Stage.ActualPositionY}
+            if Zen.Acquisition.IsLiveRunning:
+                Zen.Acquisition.StopLive(experiment_OV)
+            self.replot_grain_to_image(acquisition_informations["mica_tile_image_name"], useful_info["stage"],
+                                       grain_name)
+
+            experiment_RL = Zen.Acquisition.Experiments.GetByName(
+                acquisition_informations["experiments"]["mica_reflective"])
+            experiment_RL.SetActive()
+            Zen.Devices.Focus.TargetPosition = old_mica_z0
+            Zen.Devices.Focus.Apply()
+            time.sleep(1)
+            Zen.Application.Pause(
+                "MICA* : Please, focus on surface!" + '\n' + "OLD FOCUS AT THIS STEP WAS AT: " + str(old_mica_z0))
+
+            if Zen.Acquisition.IsLiveRunning:
+                Zen.Acquisition.StopLive(experiment_RL)
+            useful_info["z0"] = Zen.Devices.Focus.ActualPosition
+            experiment_TL = Zen.Acquisition.Experiments.GetByName(
+                acquisition_informations["experiments"]["mica_transmissive"])
+            experiment_TL.SetActive()
+            Zen.Devices.Focus.TargetPosition = old_mica_z1
+            Zen.Devices.Focus.Apply()
+            time.sleep(1)
+            Zen.Application.Pause(
+                "MICA* : Please, focus on bottom of slide!" + '\n' + "OLD FOCUS AT THIS STEP WAS AT: " + str(
+                    old_mica_z1))
+
+            useful_info["z1"] = Zen.Devices.Focus.ActualPosition
+            if Zen.Acquisition.IsLiveRunning:
+                Zen.Acquisition.StopLive(experiment_TL)
+
+            # verify the experiments
+            active_experiment = Zen.Acquisition.Experiments.ActiveExperiment
+            if experiment_TL.FileName.Split('\\')[-1] != active_experiment.FileName.Split('\\')[-1]:
+                active_experiment.SetActive()
+
+                Zen.Application.Pause(
+                    "*ATTENTION*: Your z-stack will be acquired with" + active_experiment.FileName.Split('\\')[-1] + "!")
+
+                zstack_experiment = CziXmlParser().set_zstack_experiment(active_experiment, useful_info["z0"],
+                                                                         useful_info["z1"])
+                mica_stack = Zen.Acquisition.Execute(zstack_experiment)
+                time.sleep(1)
+                zstack_experiment.Delete()
+            else:
+                zstack_experiment = CziXmlParser().set_zstack_experiment(experiment_TL, useful_info["z0"],
+                                                                         useful_info["z1"])
+                mica_stack = Zen.Acquisition.Execute(zstack_experiment)
+                time.sleep(1)
+                zstack_experiment.Delete()
+
+            mica_stack_location = old_mica_stack
+            Zen.Application.Save(mica_stack, mica_stack_location, False)
+            useful_info["mica_stack"] = mica_stack.FileName
+
+            # Reflected image acquisition
+            experiment_RL = Zen.Acquisition.Experiments.GetByName(
+                acquisition_informations["experiments"]["mica_reflective"])
+            experiment_RL.SetActive()
+
+            #zstack_experiment = CziXmlParser().set_zstack_experiment(experiment_RL, useful_info["z0"], useful_info["z1"])
+            #time.sleep(1)
+            #reflected_image = self.use_EDF(Zen.Acquisition.Execute(zstack_experiment))
+            #zstack_experiment.Delete()
+
+            Zen.Devices.Focus.MoveTo(float(useful_info["z0"]))
+            reflected_image_mi = Zen.Acquisition.AcquireImage(experiment_RL)
+            Zen.Application.Documents.Add(reflected_image_mi)
+            reflected_image_location_mica = old_mica_reflected
+            Zen.Application.Save(reflected_image_mi, reflected_image_location_mica, False)
+            useful_info["reflected_image"] = reflected_image_mi.FileName
+
+            grain_info["mica"] = useful_info
+            acquisition_informations["grains_acquired"].pop(data_index)
+            acquisition_informations["grains_acquired"].insert(data_index, grain_info)
+            Calibration().write_to_registry(acquisition_informations["mount_id"], acquisition_informations)
+
+            Zen.Application.Pause(
+                "Acquisition for this grain has finished, \ncheck the acquired images, then hit 'Continue'!")
+
+            Zen.Application.Documents.SaveAll()
+            Zen.Application.Documents.Remove(mount_stack)
+            Zen.Application.Documents.Remove(reflected_image)
+            Zen.Application.Documents.Remove(mica_stack)
+            Zen.Application.Documents.Remove(reflected_image_mi)
+            self.grain_management(None)
+
+    def reacquire_grain(self, option_name, watch):
+        """This method, step by step, covers the procedure of reacquiring an old grain.
+
+        Input Arguments:
+        option_name must be string
+        watch must be boolean
+        """
+
+        global acquisition_informations
+        import time
+
+        choice_list = ["Yes", "No", "Let me take a look"]
+        index = None
+
+        for grain_info in acquisition_informations["grains_acquired"]:
+            if grain_info["id"] == option_name:
+                index = acquisition_informations["grains_acquired"].index(grain_info)
+        if not watch:
+            mount_image = Zen.Application.LoadImage(
+                acquisition_informations["grains_acquired"][index]["mount"]["mount_stack"], False)
+            Zen.Application.Documents.Add(mount_image)
+            reflected_image = Zen.Application.LoadImage(
+                acquisition_informations["grains_acquired"][index]["mount"]["reflected_image"], False)
+            Zen.Application.Documents.Add(reflected_image)
+            if acquisition_informations["external_detector"]:
+                mica_image = Zen.Application.LoadImage(
+                    acquisition_informations["grains_acquired"][index]["mica"]["mica_stack"], False)
+                Zen.Application.Documents.Add(mica_image)
+                reflected_image_mica = Zen.Application.LoadImage(acquisition_informations["grains_acquired"][index]["mica"]["reflected_image"], False)
+                Zen.Application.Documents.Add(reflected_image_mica)
+        else:
+            for image in Zen.Application.Documents:
+                if "Mount" in image.NameWithoutExtension:
+                    mount_image = image
+                elif "Mica" in image.NameWithoutExtension:
+                    mica_image = image
+                elif "reflected_image" in image.NameWithoutExtension:
+                    reflected_image = image
+                elif "r_image_mica" in image.NameWithoutExtension:
+                    reflected_image_mica = image
+
+        Zen.Application.Pause(
+            "After hitting 'Continue' you need to choose," + '\n' + " what would you like to do with these images!" + '\n' + " *NOTE: You can check them at any time until you select reacquire!")
+
+        application_window = ZenWindow()
+        if acquisition_informations["external_detector"]:
+            application_window.AddLabel("We've loaded the last acquire Grain(Mount &amp; Mica) images for this grain id.")
+        else:
+            application_window.AddLabel("We've loaded the last acquire Mount images for this grain id.")
+        application_window.AddLabel("Are you sure you want to reacquire them?")
+        application_window.AddDropDown('reacq_grain', 'Select your answer: ', choice_list, 0)
+        result = application_window.Show()
+
+        if result.HasCanceled:
+            mssg = "The acquisition flow was stopped by the User." + '\n' + "Exit at Re-Acquire Grain."
+            Zen.Windows.Show(mssg)
+            raise SystemExit
+        user_choice = str(result.GetValue('reacq_grain'))
+
+        if user_choice == "Yes":
+            for document in Zen.Application.Documents:
+                detector = acquisition_informations["external_detector"]
+                Zen.Application.Documents.SaveAll()
+                Zen.Application.Documents.Remove(mount_image)
+                Zen.Application.Documents.Remove(reflected_image)
+                if acquisition_informations["external_detector"]:
+                    Zen.Application.Documents.Remove(mica_image)
+                    Zen.Application.Documents.Remove(reflected_image_mica)
+                self.reacquire(option_name, detector)
+        elif user_choice == "Let me take a look":
+            self.reacquire_grain(option_name, True)
+        elif user_choice == "No":
+            Zen.Application.Documents.SaveAll()
+            Zen.Application.Documents.Remove(mount_image)
+            Zen.Application.Documents.Remove(reflected_image)
+            if acquisition_informations["external_detector"]:
+                Zen.Application.Documents.Remove(mica_image)
+                Zen.Application.Documents.Remove(reflected_image_mica)
+            self.grain_management(None)
+
+    def grain_acquisition_steps(self, option, count):
+        """This method splits the application by separating the acquire new and reacquire grain functionalities.
+
+        Input Arguments:
+        option must be string
+        count must be integer
+        """
+
+        global acquisition_informations
+
+        if option == "New":
+            if acquisition_informations["external_detector"]:
+                self.acquire_new_grain(count + 1, True)
+            else:
+                self.acquire_new_grain(count + 1, False)
+        else:
+            self.reacquire_grain(option, False)
+
+    def read_directory(self):
+        """This method reads the output folder selected from the initial window for already acquired grains."""
+
+        global acquisition_informations
+        import os
+
+        grains_dirs = [sub_directory for sub_directory in os.listdir(acquisition_informations["output_path"]) if
+                       os.path.isdir(os.path.join(acquisition_informations["output_path"], sub_directory))]
+        return grains_dirs
+
+    def delete_id_plot(self, id):
+        """This method removes the plot from both mount &amp; mica, if the grain folder isn't finished or it is deleted.
+
+        Input Arguments: id must be string
+        """
+        global acquisition_informations
+
+        id = "x G" + id.split("_")[-1]
+        if acquisition_informations["external_detector"]:
+            for image in Zen.Application.Documents:
+                if "mount" in image.NameWithoutExtension:
+                    mount_img = image
+                elif "mica" in image.NameWithoutExtension:
+                    mica_img = image
+
+            for mo_gr in range(mount_img.Graphics.Count):
+                if mount_img.Graphics[mo_gr].Name == id:
+                    mount_img.Graphics.Remove(mount_img.Graphics[mo_gr])
+                    break
+                else:
+                    continue
+            for mi_gr in range(mica_img.Graphics.Count):
+                if mica_img.Graphics[mo_gr].Name == id:
+                    mica_img.Graphics.Remove(mica_img.Graphics[mo_gr])
+                    break
+                else:
+                    continue
+        else:
+            for image in Zen.Application.Documents:
+                if "mount" in image.NameWithoutExtension:
+                    mount_img = image
+
+            for mo_gr in range(mount_img.Graphics.Count):
+                if mount_img.Graphics[mo_gr].Name == id:
+                    mount_img.Graphics.Remove(mount_img.Graphics[mo_gr])
+                    break
+                else:
+                    continue
+
+    def validate(self, subfolder):
+        """This method validates if the grain acquisition was successfully finished.
+
+        Input Arguments: subfolder must be
+        Returns: status flag as boolean.
+        """
+
+        global acquisition_informations
+        import os
+
+        valid = True
+        container = []
+
+        for elem in os.listdir(subfolder):
+            container.append(elem)
+        if acquisition_informations["external_detector"]:
+            if container != [] and ('Mica' in container and 'Mount' in container):
+                return valid
+            else:
+                return not valid
+        else:
+            if container != [] and 'Mount' in container:
+                return valid
+            else:
+                return not valid
+
+    def post_processing(self):
+        """This method calls the validate method, if status flag is false deletes all the folders and sub-folders."""
+
+        global acquisition_informations
+        import os
+
+        root_path = acquisition_informations["output_path"]
+        for subf in os.listdir(root_path):
+            if os.path.isdir(os.path.join(root_path, subf)):
+                valid = self.validate(os.path.join(root_path, subf))
+                if not valid:
+                    failed_subf = os.path.join(root_path, subf)
+                    self.delete_id_plot(subf)
+                    os.rmdir(failed_subf)
+                    break
+                else:
+                    continue
+
+    def grain_management(self, condition):
+        """This method manages the whole grain acquisition process in both back-end and front-end.
+
+        Input Arguments: condition must be string
+        """
+
+        global acquisition_informations
+        import time
+
+        options = ["New"]
+        if acquisition_informations["grains_acquired"] != []:
+            previous_index = len(acquisition_informations["grains_acquired"]) - 1
+        # if condition is OPEN the tile images acquired for this mount ID,
+        # if they are freshly acquired they will be displayed anyway
+        if condition == "Open":
+            Zen.Application.Documents.Add(
+                Zen.Application.LoadImage(acquisition_informations["mount_tile_image"], False))
+            time.sleep(1)
+            if acquisition_informations["external_detector"]:
+                Zen.Application.Documents.Add(
+                    Zen.Application.LoadImage(acquisition_informations["mica_tile_image"], False))
+
+        if len(options) == 1:
+            # Set stage position to the upper right corner of the mount
+            message = "Hit 'Ok' to start the acquisiiton or " + "\n" + "'Cancel' to stop the grain acquisition workflow!"
+
+        else:
+            # Move the stage to the last acquired grain position X, Y
+            message = "Select 'New' if you want to start " + "\n" + "a new grain acquisition or " + "\n" + "select one, from the already acquired ones," + "\n" + " to reacquire them!"
+
+        self.post_processing()
+        grains = self.read_directory()
+        already_acquired_grains_count = len(grains)
+
+        application_window = ZenWindow()
+        application_window.Initialize("Grain Management")
+        if already_acquired_grains_count != 0:
+            options.extend(grains)
+            application_window.AddLabel(message)
+            application_window.AddDropDown('acquisition_type', 'Acquire: ', options, 0)
+            # move the x, y of the stage to the previous grain location
+            Zen.Devices.Stage.MoveTo(
+                float(acquisition_informations["grains_acquired"][previous_index]["mount"]["stage"]["x"]),
+                float(acquisition_informations["grains_acquired"][previous_index]["mount"]["stage"]["y"]))
+            Zen.Devices.Stage.Apply()
+            time.sleep(1)
+            # also move with Z position
+            Zen.Devices.Focus.MoveTo(float(acquisition_informations["grains_acquired"][previous_index]["mount"]["stage"]["z"]))
+        else:
+            application_window.AddLabel(message)
+            application_window.AddDropDown('acquisition_type', 'Acquire: ', options, 0)
+            Zen.Devices.Stage.MoveTo(float(acquisition_informations["coordinates"][0]["upper_right_corner"]["x"]),
+                                     float(acquisition_informations["coordinates"][0]["upper_right_corner"]["y"]))
+        application_UI = application_window.Show()
+
+        if application_UI.HasCanceled:
+            Zen.Application.Documents.SaveAll()
+            Zen.Application.Documents.RemoveAll()
+            PrepareAcquisition().show_input_window()
+
+        acquisition_option = str(application_UI.GetValue('acquisition_type'))
+        try:
+            self.grain_acquisition_steps(acquisition_option, already_acquired_grains_count)
+        except SystemExit:
+            experiment = Zen.Acquisition.Experiments.ActiveExperiment
+            if Zen.Acquisition.IsLiveRunning:
+                Zen.Acquisition.StopLive(experiment)
+            self.post_processing()
+            raise SystemExit
+
+
+blockindex = 0
+coarse_informations = {}
+fine_informations = {}
+acquisition_informations = {"grains_acquired": []}
+Zen.Application.Documents.RemoveAll()
+PrepareAcquisition().show_input_window()
+</Text>
+  <Author></Author>
+  <Description></Description>
+  <Keywords></Keywords>
+  <Row>2</Row>
+  <Column>45</Column>
+</Script>
